@@ -1,0 +1,19 @@
+// 系统时钟频率的计算
+SYSCLK = ( 外部时钟 HSE / PLL_M ) × PLL_N ÷ PLL_P
+PLL_M = 分频（降频）
+PLL_N = 倍频（升频）
+PLL_P = 再次分频（输出最终系统时钟）
+你的 8MHz 晶振 → 计算后 正好 168MHz
+
+// stm32f4xx.h
+#if !defined  (HSE_VALUE) 
+  #define HSE_VALUE    ((uint32_t)8000000) /*!< Value of the External oscillator in Hz */
+// system_stm32f4xx.c
+修改PLL_M参数
+
+// 1.确认RFID卡的引脚接线
+2.矩阵键盘的原理图
+// 3.led灯的接入
+// 4.买一个DHT11
+// 5.需要确认EEPRAM要不要购买，还是直接用内部SPIFLASH
+6.下载gec的原理图
