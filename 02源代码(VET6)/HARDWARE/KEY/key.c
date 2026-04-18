@@ -20,14 +20,14 @@ void key_init(void)
 	GPIO_InitStructure.GPIO_Pin=GPIO_Pin_0;							//第0 个引脚
 	GPIO_InitStructure.GPIO_Mode=GPIO_Mode_IN;						//输入模式
 	GPIO_InitStructure.GPIO_Speed=GPIO_High_Speed;					//引脚高速工作，收到指令立即工作；缺点：功耗高
-	GPIO_InitStructure.GPIO_PuPd=GPIO_PuPd_UP;					// 矩阵键盘 要上拉 由于外部已有上拉电阻，内部不需要上下拉电阻
+	GPIO_InitStructure.GPIO_PuPd=GPIO_PuPd_UP;					    // 矩阵键盘 要上拉 由于外部已有上拉电阻，内部不需要上下拉电阻
 	GPIO_Init(GPIOA,&GPIO_InitStructure);		
 
 	//配置硬件，配置GPIO，端口E，第2 3 4个引脚
 	GPIO_InitStructure.GPIO_Pin=GPIO_Pin_2|GPIO_Pin_3|GPIO_Pin_4;	//第2 3 4个引脚
 	GPIO_InitStructure.GPIO_Mode=GPIO_Mode_IN;						//输入模式
-	GPIO_InitStructure.GPIO_Speed=GPIO_High_Speed;				//引脚高速工作
-	GPIO_InitStructure.GPIO_PuPd=GPIO_PuPd_UP;  					// 这里改成上拉！					//由于外部已有上拉电阻，内部不需要上下拉电阻。矩阵键盘要使用内部上拉电阻
+	GPIO_InitStructure.GPIO_Speed=GPIO_High_Speed;				    //引脚高速工作
+	GPIO_InitStructure.GPIO_PuPd=GPIO_PuPd_UP;  					// 这里改成上拉！//由于外部已有上拉电阻，内部不需要上下拉电阻。矩阵键盘要使用内部上拉电阻
 	GPIO_Init(GPIOE,&GPIO_InitStructure);			
 	
 	//将PA0引脚连接到EXTI0

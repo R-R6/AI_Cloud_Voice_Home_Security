@@ -91,12 +91,12 @@ typedef struct __eeprom_t
 
 typedef struct __task_t
 {
-	TaskFunction_t pxTaskCode;
-	const char * const pcName;		
-	const configSTACK_DEPTH_TYPE usStackDepth;
-	void * const pvParameters;
-	UBaseType_t uxPriority;
-	TaskHandle_t * const pxCreatedTask;
-}task_t;
+    TaskFunction_t pxTaskCode;              // 任务函数指针
+    const char * const pcName;              // 任务名称(字符串常量)
+    const configSTACK_DEPTH_TYPE usStackDepth;  // 任务栈大小
+    void * const pvParameters;              // 任务参数指针
+    UBaseType_t uxPriority;                 // 任务优先级
+    TaskHandle_t * const pxCreatedTask;     // 任务句柄指针(用于后续控制)
+} task_t;
 
 #endif
