@@ -17,6 +17,12 @@ volatile uint8_t  g_usart3_rx_buf[128]={0};	//接收到的数据
 volatile uint32_t g_usart3_rx_cnt=0; 		//接收到的数量
 volatile uint32_t g_usart3_rx_end=0;  		//接收是否完毕的标志位
 
+// wifi模块串口3的接收缓冲区和计数值
+uint8_t  g_esp8266_tx_buf[512];				// 发送缓冲区
+volatile uint8_t  g_esp8266_rx_buf[512];    // 接收缓冲区
+volatile uint32_t g_esp8266_rx_cnt=0;		// 接收数据计数值
+volatile uint32_t g_esp8266_transparent_transmission_sta=0;//透明传输状态
+
 static GPIO_InitTypeDef  GPIO_InitStructure; //GPIO端口结构体配置属性
 static NVIC_InitTypeDef NVIC_InitStructure;  //优先级结构体配置属性
 static USART_InitTypeDef USART_InitStructure;//串口结构体初始化属性
@@ -80,7 +86,7 @@ void usart_send_bytes(USART_TypeDef* USARTx,uint8_t *buf,uint32_t len)
 	}
 }
 
-//初始化IO 串口1 （打印日志）
+//初始化IO 串口1 （打印日志） PA9 PA10
 //bound:波特率
 void uart1_init(u32 baud)
 {
@@ -129,7 +135,7 @@ void uart1_init(u32 baud)
 }
 
 
-//初始化IO 串口2 （语音模块）
+//初始化IO 串口2 （语音模块）PA2 PA3
 //bound:波特率
 void usart2_init(u32 baud)
 {
@@ -171,26 +177,27 @@ void usart2_init(u32 baud)
 }
 
 /*
-	bref：配置串口3 （蓝牙模块）PC10 PC11
+	bref：配置串口3 （ESP8266 WiFi模块）PB10 PB11
 	param1：uint32_t baud(波特率)
 */
 void usart3_init(uint32_t baud)
 {
 	//硬件时钟，端口，串口
 	RCC_APB1PeriphClockCmd(RCC_APB1Periph_USART3, ENABLE);
-	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC,ENABLE);
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB,ENABLE);
 	
 	//串口引脚要配置为复用功能模式
 	GPIO_InitStructure.GPIO_Pin=GPIO_Pin_10|GPIO_Pin_11;//10 11号引脚
 	GPIO_InitStructure.GPIO_Mode=GPIO_Mode_AF;//复用功能模式（引脚既可以软件代码控制，也可以其他外设控制）
 	GPIO_InitStructure.GPIO_OType=GPIO_OType_PP;//推挽 Push Pull；开漏 Open Drain
-	GPIO_InitStructure.GPIO_PuPd=GPIO_PuPd_NOPULL;//不使能上下拉电阻
+	/* RX(PB11) 上拉：模块 TX 空闲为高，无上拉时悬空易导致误码或无中断 */
+	GPIO_InitStructure.GPIO_PuPd=GPIO_PuPd_UP;
 	GPIO_InitStructure.GPIO_Speed=GPIO_High_Speed;//高速，功耗高，但是引脚响应时间更短
-	GPIO_Init(GPIOC,&GPIO_InitStructure);	
+	GPIO_Init(GPIOB,&GPIO_InitStructure);	
 	
 	//指定引脚的功能，连接到串口3
-	GPIO_PinAFConfig(GPIOC, GPIO_PinSource10, GPIO_AF_USART3);
-	GPIO_PinAFConfig(GPIOC, GPIO_PinSource11, GPIO_AF_USART3);	
+	GPIO_PinAFConfig(GPIOB, GPIO_PinSource10, GPIO_AF_USART3);
+	GPIO_PinAFConfig(GPIOB, GPIO_PinSource11, GPIO_AF_USART3);	
 	
 	//配置串口3相关的参数
 	USART_InitStructure.USART_BaudRate = baud;
@@ -208,12 +215,61 @@ void usart3_init(uint32_t baud)
 	USART_ITConfig(USART3,USART_IT_RXNE,ENABLE);
 	
 	NVIC_InitStructure.NVIC_IRQChannel = USART3_IRQn;
-	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0;
-	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
+	/* 与 USART2 一致：优先级不得低于 configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY，
+	 * 否则 ISR 内调用 taskENTER_CRITICAL_FROM_ISR 不符合 FreeRTOS Cortex-M 约定 */
+	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY;
+	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 1;
 	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
 	NVIC_Init(&NVIC_InitStructure);
 }
 
+/*
+	bref：配置串口4 （蓝牙模块）PC10 PC11
+	param1：uint32_t baud(波特率)
+*/
+void uart4_init(uint32_t baud)
+{
+	//使能端口C硬件时钟
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC,ENABLE);
+	
+	//使能UART4硬件时钟（UART4挂载在APB1总线上）
+	RCC_APB1PeriphClockCmd(RCC_APB1Periph_UART4,ENABLE);
+	
+	//配置PC10、PC11为复用功能引脚
+	GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_10|GPIO_Pin_11;
+	GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_AF;
+	GPIO_InitStructure.GPIO_Speed = GPIO_High_Speed;
+	GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
+	GPIO_InitStructure.GPIO_PuPd  = GPIO_PuPd_NOPULL;	
+	GPIO_Init(GPIOC,&GPIO_InitStructure);
+	
+	//将PC10、PC11连接到UART4的硬件
+	GPIO_PinAFConfig(GPIOC, GPIO_PinSource10, GPIO_AF_UART4);
+	GPIO_PinAFConfig(GPIOC, GPIO_PinSource11, GPIO_AF_UART4);
+	
+	
+	//配置UART4的相关参数：波特率、数据位、校验位
+	USART_InitStructure.USART_BaudRate = baud;//波特率
+	USART_InitStructure.USART_WordLength = USART_WordLength_8b;//8位数据位
+	USART_InitStructure.USART_StopBits = USART_StopBits_1;//1位停止位
+	USART_InitStructure.USART_Parity = USART_Parity_No;//无奇偶校验
+	USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;//无硬件流控制
+	USART_InitStructure.USART_Mode = USART_Mode_Rx | USART_Mode_Tx;//允许串口发送和接收数据
+	USART_Init(UART4, &USART_InitStructure);
+	
+	
+	//使能串口接收到数据触发中断
+	USART_ITConfig(UART4, USART_IT_RXNE, ENABLE);
+	
+	NVIC_InitStructure.NVIC_IRQChannel = UART4_IRQn;
+	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY;
+	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
+	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+	NVIC_Init(&NVIC_InitStructure);
+	
+	//使能UART4工作
+	USART_Cmd(UART4,ENABLE);
+}
 
 //串口1中断服务程序
 void USART1_IRQHandler(void)                	
@@ -264,25 +320,50 @@ void USART2_IRQHandler(void)
 }
 
 
-//串口3中断服务函数
+//串口3中断服务函数（esp8266模块）
 void USART3_IRQHandler(void)
 {
 	uint8_t d;
-	
-	//检测标志位
-	if(USART_GetITStatus(USART3,USART_IT_RXNE) == SET)
+	uint32_t ulReturn;
+
+	ulReturn = taskENTER_CRITICAL_FROM_ISR();
+
+	if (USART_GetITStatus(USART3, USART_IT_RXNE) != RESET)
 	{
-		//添加用户代码
-		d= USART_ReceiveData(USART3);
-		
-		//一个字节一个字节的存入数组中
-		if(g_usart3_rx_cnt<sizeof(g_usart3_rx_buf))
-			g_usart3_rx_buf[g_usart3_rx_cnt++]=d;
+		d = USART_ReceiveData(USART3);
+		if (g_esp8266_rx_cnt < (sizeof(g_esp8266_rx_buf) - 1))
+			g_esp8266_rx_buf[g_esp8266_rx_cnt++] = d;
+	}
+	else if (USART_GetFlagStatus(USART3, USART_FLAG_ORE) != RESET)
+	{
+		/* 溢出未处理会卡住后续接收 */
+		d = (uint8_t)USART_ReceiveData(USART3);
+		(void)d;
+	}
+
+	taskEXIT_CRITICAL_FROM_ISR(ulReturn);
+}
+
+//UART4的中断服务函数(蓝牙模块)
+void UART4_IRQHandler(void)
+{
+	uint8_t d=0;
 	
-		//清空标志位	
-		USART_ClearITPendingBit(USART3,USART_IT_RXNE);
+	//检测是否接收到数据
+	if (USART_GetITStatus(UART4, USART_IT_RXNE) == SET)
+	{
+		d=USART_ReceiveData(UART4);
+		
+		// 蓝牙数据存入g_usart3_rx_buf
+		if(g_usart3_rx_cnt<(sizeof(g_usart3_rx_buf)-1))
+			g_usart3_rx_buf[g_usart3_rx_cnt++]=d;
+		
+	
+		//清空标志位，可以响应新的中断请求
+		USART_ClearITPendingBit(UART4, USART_IT_RXNE);
 	}
 }
+
 
 
 

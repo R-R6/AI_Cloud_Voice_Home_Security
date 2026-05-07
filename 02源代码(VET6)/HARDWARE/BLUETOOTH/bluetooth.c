@@ -5,7 +5,7 @@ static TIM_TimeBaseInitTypeDef  TIM_TimeBaseStructure;  //定时器结构体初�
 
 void blue_init(uint32_t baud)
 {
-	usart3_init(baud);
+	uart4_init(baud);
 }
 
 //配置定时器3
@@ -38,10 +38,10 @@ void tim3_init(void)
 
 
 
-//发送蓝牙相关指令给到串口3
+//发送蓝牙相关指令给到串口4(UART4)
 void blue_send_str(char *str)
 {
-	usart_send_str(USART3, str);
+	usart_send_str(UART4, str);
 }
 
 

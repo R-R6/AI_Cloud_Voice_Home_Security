@@ -29,7 +29,12 @@
 		（2）播报当前时间
 		（3）播报当前温湿度值
 		（4）播报当前安防状态（火焰预警、可燃气体是否超标）
-	9.临界区
+	9. 连接WiFi远程访问
+		通过WiFi模块远程访问阿里云服务器，利用MQTT协议远程获取或设置家居安防状态
+		（1）远程控制灯光亮灭
+		（2）温湿度状态
+		（3）火焰预警、可燃气体是否超标
+	10.临界区
 		（1）关键变量、代码的保护
 		（2）看门狗喂狗		
 	10.软件定时器
@@ -44,12 +49,16 @@
 #include "includes.h"
 
 /* 全局变量 */
-const uint8_t defalut_distance[1]={0x32}; 			// 默认安全距离 50mm
-volatile uint8_t g_alarm_distance = 50;            // 全局报警距离，默认50mm（和默认值一致）
-volatile uint8_t g_valid_card_id[5] = {0};  	   // 全局有效卡ID数组（5字节，对应RFID卡号长度）
-volatile uint8_t g_fire_status = 0;  // 0=安全，1=报警
-volatile uint8_t g_mq2_status = 0;   // 0=安全，1=报警
+//上传到mqtt服务器的温湿度
+float g_temp=0.0;
+float g_humi=0.0;
 
+static volatile uint32_t g_esp8266_init=0;
+const uint8_t defalut_distance[1]={0x32}; 		// 默认安全距离 50mm
+volatile uint8_t g_alarm_distance = 50;            	// 全局报警距离，默认50mm（和默认值一致）
+volatile uint8_t g_valid_card_id[5] = {0};  	   	// 全局有效卡ID数组（5字节，对应RFID卡号长度）
+volatile uint8_t g_fire_status = 0;  				// 0=安全，1=报警
+volatile uint8_t g_mq2_status = 0;   				// 0=安全，1=报警
 
 //MFRC522数据区
 volatile u8  mfrc552pidbuf[18];
@@ -77,6 +86,9 @@ static TaskHandle_t app_task_mq2_handle = NULL;
 static TaskHandle_t app_task_dht11_handle = NULL;
 static TaskHandle_t app_task_bluetooth_handle = NULL;
 static TaskHandle_t app_task_aspro_handle = NULL;
+static TaskHandle_t g_app_task_mqtt_handle = NULL;
+static TaskHandle_t g_app_task_esp8266_handle = NULL;
+static TaskHandle_t g_app_task_monitor_handle = NULL;
 
 
 /* 任务 硬件/任务初始化 */ 
@@ -121,6 +133,15 @@ static void app_task_bluetooth(void* pvParameters);
 /* 任务 语音识别 */ 
 static void app_task_aspro(void* pvParameters);  
 
+/* 任务 mqtt上报状态 */  
+static void app_task_mqtt(void* pvParameters); 
+
+/* 任务 无线WiFi模块-esp8266*/  
+static void app_task_esp8266(void* pvParameters); 
+
+/* 任务 监控任务*/  
+static void app_task_monitor(void* pvParameters); 
+
 
 /* 互斥型信号量句柄 */
 SemaphoreHandle_t g_mutex_printf=NULL; 
@@ -138,6 +159,7 @@ QueueHandle_t g_queue_led=NULL;
 QueueHandle_t g_queue_fire=NULL;
 QueueHandle_t g_queue_mq2=NULL;
 QueueHandle_t g_queue_dht11=NULL;
+QueueHandle_t g_queue_esp8266=NULL;
 
 /* 二值信号量句柄 */
 // 用于通知状态变化（蓝牙和语音各一套，避免抢信号）
@@ -153,14 +175,15 @@ void dgb_printf_safe(const char *format, ...)
 
 	va_list args;
 	va_start(args, format);
-	
-	/* 获取互斥信号量 */
-	xSemaphoreTake(g_mutex_printf,portMAX_DELAY);
-	
+
+	/* 互斥量未创建前避免 xSemaphoreTake(NULL) 死机（仅早期启动阶段） */
+	if (g_mutex_printf != NULL)
+		xSemaphoreTake(g_mutex_printf, portMAX_DELAY);
+
 	vprintf(format, args);
-			
-	/* 释放互斥信号量 */
-	xSemaphoreGive(g_mutex_printf);	
+
+	if (g_mutex_printf != NULL)
+		xSemaphoreGive(g_mutex_printf);
 
 	va_end(args);
 #else
@@ -225,6 +248,9 @@ static const task_t task_tbl[] = {
 	{app_task_dht11,       "app_task_dht11",       512,    NULL,    5,  &app_task_dht11_handle},
 	{app_task_bluetooth,   "app_task_bluetooth",   512,    NULL,    5,  &app_task_bluetooth_handle},
 	{app_task_aspro,       "app_task_aspro",       512,    NULL,    5,  &app_task_aspro_handle},
+	{app_task_mqtt,        "app_task_mqtt",        512,    NULL,    5,  &g_app_task_mqtt_handle},
+	{app_task_esp8266,     "app_task_esp8266",     1536,   NULL,    5,  &g_app_task_esp8266_handle},
+	{app_task_monitor,     "app_task_monitor",     1024,   NULL,    5,  &g_app_task_monitor_handle},
 	
 	{0, 0, 0, 0, 0, 0} // 列表结束标志
 };
@@ -262,6 +288,8 @@ static void app_task_init(void* pvParameters)
 	g_queue_fire=xQueueCreate(5,32);
 	g_queue_mq2=xQueueCreate(5,32);	
 	g_queue_dht11=xQueueCreate(5,5);	
+	g_queue_esp8266=xQueueCreate(3,sizeof(g_esp8266_rx_buf));	
+	
 	
 		  
 	/* 创建周期软件定时器 */
@@ -338,7 +366,7 @@ static void app_task_init(void* pvParameters)
 	
 	/* 创建用到的任务 */
 	i = 0;
-	while (task_tbl[i].pxTaskCode)
+	while (task_tbl[i].pxTaskCode)     // 当pxTaskCode为0时停止 while 先判断后循环，避免访问无效数据
 	{
 		xTaskCreate(task_tbl[i].pxTaskCode,		/* 任务入口函数 */
 					task_tbl[i].pcName,			/* 任务名字 */
@@ -829,6 +857,7 @@ static void app_task_key(void* pvParameters)
 	// 主菜单标志位（1=当前在主菜单，0=数据页/图标页）
 	uint8_t is_main_menu = 1; // 初始状态是主菜单，所以默认1
 	
+	uint8_t beep_sta=0x00;
 	uint8_t fire_sta[32];
 	uint8_t mq2_sta[32];
 	uint8_t dht11_sta[5];
@@ -1006,6 +1035,10 @@ static void app_task_key(void* pvParameters)
 							vTaskSuspend(app_task_sr04_handle);
 						}
 					}
+					
+					/* 停止蜂鸣器报警（返回图标选择页时取消所有报警） */
+					beep_sta=0x00;	//蜂鸣器关
+					xQueueSend(g_queue_beep,&beep_sta,1000);
 					
 					// 清屏，显示当前数据页对应的图标
 					oled.ctrl=OLED_CTRL_CLEAR;
@@ -1350,7 +1383,7 @@ static void app_task_lm393(void* pvParameters)
         // adc_val = fire_get_adc(); // 原来的ADC获取（注释掉）
         // dgb_printf_safe("fire_adc_val=%d\r\n",adc_val);  // 原来的调试输出
         adc_val = fire_get_d0();    // 替换为读取PB7电平（0=有火，1=无火）
-        dgb_printf_safe("fire_d0_val=%d\r\n",adc_val);  // 调试输出改为DO电平
+        // dgb_printf_safe("fire_d0_val=%d\r\n",adc_val);  // 调试输出改为DO电平
 
         if(n > 5) // 跳过前5次采样（稳定传感器）
         {
@@ -1493,7 +1526,7 @@ static void app_task_mq2(void* pvParameters)
         // adc_val = mq2_get_adc(); // 原来的ADC获取（注释掉）
         // dgb_printf_safe("mq2_adc_val=%d\r\n",adc_val); // 原来的调试输出
         adc_val = mq2_get_do();    // 读取MQ2 DO电平（0=有烟，1=无烟）
-        dgb_printf_safe("mq2_do_val=%d\r\n",adc_val);  // 调试输出改为DO电平
+        // dgb_printf_safe("mq2_do_val=%d\r\n",adc_val);  // 调试输出改为DO电平
 
         if(n > 0) // 跳过第1次采样（稳定传感器）
         {
@@ -1559,7 +1592,8 @@ static void app_task_dht11(void* pvParameters)
 		
 		if(rt == 0)
 		{
-			dgb_printf_safe("H:%d.%d T:%d.%d\r\n",dht11_sta[0],dht11_sta[1],dht11_sta[2],dht11_sta[3]);
+			// 打印温湿度信息调试用
+			// dgb_printf_safe("H:%d.%d T:%d.%d\r\n",dht11_sta[0],dht11_sta[1],dht11_sta[2],dht11_sta[3]);
 			
 			//发送消息，超时时间为1000个节拍
 			xQueueSend(g_queue_dht11,dht11_sta,1000);
@@ -1936,7 +1970,7 @@ static void app_task_aspro(void* pvParameters)
 			//打开客厅灯
 			if(strstr((char *)g_usart2_rx_buf,"LED ON"))
 			{
-				led_sta=0x07;	//LED3开
+				led_sta=0x07;	//LED3开 0x 0000 0111
 				//发送消息，超时时间为1000个节拍
 				xQueueSend(g_queue_led,&led_sta,1000);
 				asr_send_str("1#");
@@ -1945,7 +1979,7 @@ static void app_task_aspro(void* pvParameters)
 			//关闭客厅灯
 			if(strstr((char *)g_usart2_rx_buf,"LED OFF"))
 			{
-				led_sta=0x0F;	//全灭
+				led_sta=0x0F;	//全灭 0x 0000 1111
 				//发送消息，超时时间为1000个节拍
 				xQueueSend(g_queue_led,&led_sta,1000);
 				asr_send_str("2#");
@@ -2105,6 +2139,178 @@ static void app_task_aspro(void* pvParameters)
 	}
 }
 
+
+/* 任务 mqtt上报状态 */  
+static void app_task_mqtt(void* pvParameters)
+{
+	BaseType_t xret;
+	uint32_t 	delay_1s_cnt=0;
+	uint8_t		buf[5]={20,05,56,8,20};
+	
+	dgb_printf_safe("[app_task_mqtt] create success\r\n");
+	
+	dgb_printf_safe("[app_task_mqtt] suspend\r\n");
+
+	vTaskSuspend(NULL);
+	
+	dgb_printf_safe("[app_task_mqtt] resume\r\n");
+	
+	vTaskDelay(1000);
+	
+	for(;;)
+	{
+		//发送心跳包
+		mqtt_send_heart();
+		
+		//上报设备状态
+		mqtt_report_devices_status();	
+		
+		delay_ms(1000);
+		
+		delay_1s_cnt++;
+		
+		if(delay_1s_cnt >= 6 )
+		{	
+			delay_1s_cnt=0;
+			
+			/* DHT11 失败时不入队；若用 portMAX_DELAY 会永久卡死本任务，串口再无日志 */
+			xret=xQueueReceive(g_queue_dht11,buf,pdMS_TO_TICKS(200));
+			(void)xret; /* 超时则沿用上次 buf，避免 DHT 异常时卡死 MQTT 任务 */
+
+			g_temp=(float)buf[2]+(float)buf[3]/10;
+			g_humi=(float)buf[0]+(float)buf[1]/10;
+
+			/* 火焰/烟雾：已由 app_task_lm393、app_task_mq2 更新 g_fire_status、g_mq2_status，
+			 * 此处再从队列读并超时默认 safe 会覆盖真实报警，故不再同步 */
+
+		}
+	}
+}
+
+
+/* 任务 无线WiFi模块-esp8266*/  
+static void app_task_monitor(void* pvParameters)
+{
+	uint32_t esp8266_rx_cnt=0;
+	
+	BaseType_t xReturn = pdFALSE;	
+	
+	dgb_printf_safe("[app_task_monitor] create success \r\n");
+	
+	for(;;)
+	{	
+		esp8266_rx_cnt = g_esp8266_rx_cnt;
+		
+		delay_ms(10);
+		
+		/* n毫秒后，发现g_esp8266_rx_cnt没有变化，则认为接收数据结束 */
+		if(g_esp8266_init && esp8266_rx_cnt && (esp8266_rx_cnt == g_esp8266_rx_cnt))
+		{
+			/* 发送消息，如果队列满了，超时时间为1000个节拍，如果1000个节拍都发送失败，函数直接返回 */
+			xReturn = xQueueSend(g_queue_esp8266,(void *)g_esp8266_rx_buf,1000);		
+			
+			if (xReturn != pdPASS)
+				dgb_printf_safe("[app_task_monitor] xQueueSend g_queue_esp8266 error code is %d\r\n", xReturn);
+			
+			g_esp8266_rx_cnt=0;
+			memset((void *)g_esp8266_rx_buf,0,sizeof(g_esp8266_rx_buf));
+		
+		}	
+	}
+}
+
+
+/* 任务 监控任务*/ 
+static void app_task_esp8266(void* pvParameters)
+{
+	uint8_t beep_sta=0x00;
+	uint8_t buf[512];
+	BaseType_t xReturn = pdFALSE;	
+	uint32_t i;
+	
+	dgb_printf_safe("[app_task_esp8266] create success\r\n");
+	
+	while(esp8266_mqtt_init())
+	{
+		dgb_printf_safe("esp8266_mqtt_init retry...\r\n");
+
+		delay_ms(1000);
+	}
+	
+	//蜂鸣器嘀两声，示意连接成功
+	beep_sta=0x01;	//蜂鸣器开
+	//发送消息，超时时间为1000个节拍
+	xQueueSend(g_queue_beep,&beep_sta,1000);
+	delay_ms(100);
+	
+	beep_sta=0x00;	//蜂鸣器关
+	//发送消息，超时时间为1000个节拍
+	xQueueSend(g_queue_beep,&beep_sta,1000);	
+	delay_ms(100);
+	
+	beep_sta=0x01;	//蜂鸣器开
+	//发送消息，超时时间为1000个节拍
+	xQueueSend(g_queue_beep,&beep_sta,1000);
+	delay_ms(100);
+	
+	beep_sta=0x00;	//蜂鸣器关
+	//发送消息，超时时间为1000个节拍
+	xQueueSend(g_queue_beep,&beep_sta,1000);	
+
+	dgb_printf_safe("esp8266 connect oneNET with mqtt success\r\n");	
+	
+	vTaskResume(g_app_task_mqtt_handle);
+	
+	g_esp8266_init=1;
+	
+	for(;;)
+	{	
+		xReturn = xQueueReceive(g_queue_esp8266,	/* 消息队列的句柄 */
+								buf,				/* 得到的消息内容 */
+								portMAX_DELAY); 	/* 等待时间一直等 */
+		if (xReturn != pdPASS)
+		{
+			dgb_printf_safe("[app_task_esp8266] xQueueReceive error code is %d\r\n", xReturn);
+			continue;
+		}	
+
+		for(i=0;i<sizeof(buf);i++)
+		{
+			//判断的关键字符是否为 1"
+			//核心数据，即{"switch_led_1":1}中的“1”
+			if((buf[i]==0x31) && (buf[i+1]==0x22))
+			{
+					//判断控制变量
+					if( buf[i+3]=='1' )
+						PFout(9)=0;//控制灯亮
+					else
+						PFout(9)=1;//控制灯灭
+			}	
+
+			//判断的关键字符是否为 2"
+			//核心数据，即{"switch_led_2":1}中的“1”
+			if((buf[i]==0x32) && (buf[i+1]==0x22))
+			{
+					//判断控制变量
+					if( buf[i+3]=='1' )
+						PFout(10)=0;//控制灯亮
+					else
+						PFout(10)=1;//控制灯灭
+			}
+
+			//判断的关键字符是否为 3"
+			//核心数据，即{"switch_led_3":1}中的“1”
+			if(buf[i]==0x33 && buf[i+1]==0x22)
+			{
+					//判断控制变量
+					if( buf[i+3]=='1' )
+						PEout(13)=0;//控制灯亮
+					else
+						PEout(13)=1;//控制灯灭
+			}				
+		}
+	}
+}
 
 /*-----------------------------------------------------------*/
 

@@ -35,6 +35,8 @@
 #include "dht11.h"			//温湿度传感器
 #include "bluetooth.h"		//蓝牙
 #include "aspro.h"			//语音设别模块
+#include "esp8266.h"		//无线WiFi模块-esp8266
+#include "esp8266_mqtt.h"	//esp8266的mqtt协议封装
 
 /* 宏定义 */
 #define EVENT_GROUP_RTC_WAKEUP		0x01
@@ -51,6 +53,16 @@ extern SemaphoreHandle_t    g_mutex_alarm;
 
 extern EventGroupHandle_t 	g_event_group;
 
+// 传感器状态全局变量（0=安全，1=报警）
+extern volatile uint8_t g_fire_status;
+extern volatile uint8_t g_mq2_status;
+
+// 温湿度全局变量
+extern float g_temp;
+extern float g_humi;
+
+/* 函数声明 */
+extern void dgb_printf_safe(const char *format, ...);  // 线程安全的调试打印函数
 
 /* 类型 */
 typedef struct __oled_t

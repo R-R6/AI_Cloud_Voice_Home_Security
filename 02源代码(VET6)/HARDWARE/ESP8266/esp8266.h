@@ -6,15 +6,16 @@
 
 //添加WIFI热点宏定义，此处根据自己的wifi作调整
 #define WIFI_SSID 			"WZG"
-#define WIFI_PASSWORD		"12345678"
+#define WIFI_PASSWORD		"qwertyuiop123"
 
-extern uint8_t  g_esp8266_tx_buf[512];
-extern volatile uint8_t  g_esp8266_rx_buf[512];
-extern volatile uint32_t g_esp8266_rx_cnt;
+extern uint8_t  g_esp8266_tx_buf[512];  // 发送缓冲区
+extern volatile uint8_t  g_esp8266_rx_buf[512];// 接收缓冲区
+extern volatile uint32_t g_esp8266_rx_cnt;// 接收数据计数值
 
 extern volatile uint32_t g_esp8266_transparent_transmission_sta;
 
-extern void 	esp8266_init(void);
+extern void 	usart3_send_str(char *str);
+extern void 	esp8266_init(uint32_t baud);
 extern int32_t  esp8266_self_test(void);
 extern int32_t 	esp8266_exit_transparent_transmission (void);
 extern int32_t 	esp8266_entry_transparent_transmission(void);
@@ -24,6 +25,7 @@ extern int32_t 	esp8266_disconnect_server(void);
 extern void 	esp8266_send_bytes(uint8_t *buf,uint32_t len);
 extern void 	esp8266_send_str(char *buf);
 extern void 	esp8266_send_at(char *str);
+extern int32_t  esp8266_find_str_in_rx_packet(char *str,uint32_t timeout);  // 新增：查找接收数据中的字符串
 extern int32_t  esp8266_enable_multiple_id(uint32_t b);
 extern int32_t 	esp8266_create_server(uint16_t port);
 extern int32_t 	esp8266_close_server(uint16_t port);

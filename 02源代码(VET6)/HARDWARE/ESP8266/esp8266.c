@@ -1,126 +1,48 @@
 ﻿#include "includes.h"
 
-static USART_InitTypeDef USART_InitStructure;
-static GPIO_InitTypeDef  GPIO_InitStructure;
-static NVIC_InitTypeDef  NVIC_InitStructure;
-
-uint8_t  g_esp8266_tx_buf[512];
-volatile uint8_t  g_esp8266_rx_buf[512];
-volatile uint32_t g_esp8266_rx_cnt=0;
-
-volatile uint32_t g_esp8266_transparent_transmission_sta=0;
-
-
-//初始化IO 串口6 
-//bound:波特率
-void usart6_init(uint32_t baud)
+//发送字符串给到串口3(ESP8266使用USART3)
+void usart3_send_str(char *str)
 {
-	//使能端口C硬件时钟
-	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC,ENABLE);
-	
-	//使能串口6硬件时钟
-	RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART6,ENABLE);
-	
-	//配置PC6、PC7为复用功能引脚
-	GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_6|GPIO_Pin_7;
-	GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_AF;
-	GPIO_InitStructure.GPIO_Speed = GPIO_High_Speed;
-	GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
-	GPIO_InitStructure.GPIO_PuPd  = GPIO_PuPd_NOPULL;	
-	GPIO_Init(GPIOC,&GPIO_InitStructure);
-	
-	//将PC6、PC7连接到USART6的硬件
-	GPIO_PinAFConfig(GPIOC, GPIO_PinSource6, GPIO_AF_USART6);
-	GPIO_PinAFConfig(GPIOC, GPIO_PinSource7, GPIO_AF_USART6);
-	
-	
-	//配置USART1的相关参数：波特率、数据位、校验位
-	USART_InitStructure.USART_BaudRate = baud;//波特率
-	USART_InitStructure.USART_WordLength = USART_WordLength_8b;//8位数据位
-	USART_InitStructure.USART_StopBits = USART_StopBits_1;//1位停止位
-	USART_InitStructure.USART_Parity = USART_Parity_No;//无奇偶校验
-	USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;//无硬件流控制
-	USART_InitStructure.USART_Mode = USART_Mode_Rx | USART_Mode_Tx;//允许串口发送和接收数据
-	USART_Init(USART6, &USART_InitStructure);
-	
-	
-	//使能串口接收到数据触发中断
-	USART_ITConfig(USART6, USART_IT_RXNE, ENABLE);
-	
-	NVIC_InitStructure.NVIC_IRQChannel = USART6_IRQn;
-	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY;
-	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
-	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-	NVIC_Init(&NVIC_InitStructure);
-	
-	//使能串口6工作
-	USART_Cmd(USART6,ENABLE);
+	usart_send_str(USART3,str);
 }
 
 
-//发送字符串给到串口6
-void usart6_send_str(char *str)
+//发送字节给到串口3(ESP8266使用USART3)
+void usart3_send_bytes(uint8_t *buf,uint32_t len)
 {
-	char *p = str;
-	
-	while(*p!='\0')
-	{
-		USART_SendData(USART6,*p);
-		
-		p++;
-		
-		//等待数据发送成功
-		while(USART_GetFlagStatus(USART6,USART_FLAG_TXE)==RESET);
-	}
-}
-
-
-//发送字节给到串口6
-void usart6_send_bytes(uint8_t *buf,uint32_t len)
-{
-	uint8_t *p = buf;
-	
-	while(len--)
-	{
-		USART_SendData(USART6,*p);
-		
-		p++;
-		
-		//等待数据发送成功
-		while(USART_GetFlagStatus(USART6,USART_FLAG_TXE)==RESET);
-	}
+	usart_send_bytes(USART3,buf,len);
 }
 
 
 //esp8266初始化
-void esp8266_init(void)
+void esp8266_init(uint32_t baud)
 {
-	usart6_init(115200);
+	// 注意: ESP8266硬件连接到PB10/PB11,这些引脚对应USART3(不是UART4)
+	// 根据VET6引脚配置.txt: ESP8266 TX→PB10(RXD), RX→PB11(TXD)
+	usart3_init(baud);
 }
 
 
 void esp8266_send_at(char *str)
 {
-	//清空接收缓冲区
-	memset((void *)g_esp8266_rx_buf,0, sizeof g_esp8266_rx_buf);
-	
-	//清空接收计数值
-	g_esp8266_rx_cnt = 0;	
-	
-	//串口6发送数据
-	usart6_send_str(str);
+	/* 必须在发送前清空：先发再等 10ms 再清空会把模块已返回的 OK 删掉，
+	 * 导致 esp8266_reset / self_test / connect_ap 等全部误判超时 */
+	memset((void *)g_esp8266_rx_buf, 0, sizeof g_esp8266_rx_buf);
+	g_esp8266_rx_cnt = 0;
+
+	usart3_send_str(str);
 }
 
 
 void esp8266_send_bytes(uint8_t *buf,uint32_t len)
 {
-	usart6_send_bytes(buf,len);
+	usart3_send_bytes(buf,len);
 }
 
 
 void esp8266_send_str(char *buf)
 {
-	usart6_send_str(buf);
+	usart3_send_str(buf);
 }
 
 
@@ -349,39 +271,24 @@ int32_t esp8266_enable_echo(uint32_t b)
 /* 复位 */
 int32_t esp8266_reset(void)
 {
+	uint32_t i;
+
 	esp8266_send_at("AT+RST\r\n");
-	
-	if(esp8266_find_str_in_rx_packet("OK",10000))
-		return -1;
+	/* 不少新版 AT 固件重启后只有 busy/OK/WIFI DISCONNECT，不再打印小写 ready，
+	 * 若仍等待 ready 会导致 STM32 侧永远判失败；改为等待重启完成后轮询 AT */
+	/* 含 WiFi 自动重连时模块可能较晚才响应 AT */
+	delay_ms(3500);
 
-	return 0;
-}
-
-
-//串口6的中断服务函数
-void USART6_IRQHandler(void)
-{
-	uint8_t d=0;
-	
-	uint32_t ulReturn;
-	
-	
-	/* 进入临界段，临界段可以嵌套 */
-	ulReturn = taskENTER_CRITICAL_FROM_ISR();
-	
-	//检测是否接收到数据
-	if (USART_GetITStatus(USART6, USART_IT_RXNE) == SET)
+	for (i = 0; i < 40; i++)
 	{
-		d=USART_ReceiveData(USART6);
-		
-		if(g_esp8266_rx_cnt<(sizeof(g_esp8266_rx_buf)-1))
-			g_esp8266_rx_buf[g_esp8266_rx_cnt++]=d;
-		
-	
-		//清空标志位，可以响应新的中断请求
-		USART_ClearITPendingBit(USART6, USART_IT_RXNE);
+		esp8266_send_at("AT\r\n");
+		if (esp8266_find_str_in_rx_packet("OK", 800) == 0)
+			return 0;
+		delay_ms(300);
 	}
-	
-	/* 退出临界段 */
-	taskEXIT_CRITICAL_FROM_ISR( ulReturn );
+	return -1;
 }
+
+// 注意：USART3_IRQHandler 已在 usart.c 中定义，此处不再重复定义
+// usart.c 中的 USART3_IRQHandler 已经正确处理了 g_esp8266_rx_buf 的接收
+
