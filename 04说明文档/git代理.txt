@@ -1,0 +1,21 @@
+一、临时给当前终端会话设置代理（推荐先试这个）
+在 PowerShell 里直接执行下面这两句，只对当前打开的这个终端窗口生效，关了就恢复原样，不会影响全局配置：
+powershell
+# 设置 HTTP/HTTPS 代理
+$env:HTTP_PROXY = "http://127.0.0.1:7897"
+$env:HTTPS_PROXY = "http://127.0.0.1:7897"
+
+# 测试一下代理是否生效
+curl https://github.com
+
+二、给 Git 单独配置代理（永久生效，只影响 Git）
+如果想让 Git 每次都走代理，直接在终端里执行下面的命令：
+powershell
+# 给Git配置全局代理（https方式）
+git config --global http.proxy http://127.0.0.1:7897
+git config --global https.proxy http://127.0.0.1:7897
+
+如果哪天想取消代理，直接执行：
+powershell
+git config --global --unset http.proxy
+git config --global --unset https.proxy
