@@ -1,20 +1,41 @@
 ﻿#include "includes.h"
 
-//发送字符串给到串口3(ESP8266使用USART3)
+/*
+ * 底层收发：USART3（硬件接 ESP8266 TX/RX，见 esp8266_init 注释）。
+ * esp8266_send_at 在发送前清空接收缓冲，便于同步等待 OK；
+ * 与 esp8266_mqtt.c 中依赖 g_esp8266_rx_cnt 的轮询方式不要混用同一缓冲区逻辑以免竞态。
+ */
+
+/**
+ * @brief 通过 USART3 发送以 \\0 结尾的字符串（ESP8266 链路）。
+ *
+ * @param[in] str 待发送字符串指针。
+ */
 void usart3_send_str(char *str)
 {
 	usart_send_str(USART3,str);
 }
 
 
-//发送字节给到串口3(ESP8266使用USART3)
+/**
+ * @brief 通过 USART3 发送指定长度字节流。
+ *
+ * @param[in] buf 数据首指针。
+ * @param[in] len 字节长度。
+ */
 void usart3_send_bytes(uint8_t *buf,uint32_t len)
 {
 	usart_send_bytes(USART3,buf,len);
 }
 
 
-//esp8266初始化
+/**
+ * @brief 初始化与 ESP8266 相连的 USART3（波特率可配，MQTT 工程常用 115200）。
+ *
+ * @param[in] baud 波特率数值（如 115200）。
+ *
+ * @note 硬件接线：ESP8266 UART 对应 PB10/PB11（USART3），勿与 UART4 混淆。
+ */
 void esp8266_init(uint32_t baud)
 {
 	// 注意: ESP8266硬件连接到PB10/PB11,这些引脚对应USART3(不是UART4)
@@ -23,6 +44,13 @@ void esp8266_init(uint32_t baud)
 }
 
 
+/**
+ * @brief 发送一条 AT 文本前清空 g_esp8266_rx_buf / g_esp8266_rx_cnt，便于同步等待响应。
+ *
+ * @param[in] str 完整 AT 行（通常含 \\r\\n）。
+ *
+ * @note 与 esp8266_mqtt.c 中依赖接收缓冲未清空的轮询逻辑不同，二者勿混用于同一事务。
+ */
 void esp8266_send_at(char *str)
 {
 	/* 必须在发送前清空：先发再等 10ms 再清空会把模块已返回的 OK 删掉，
@@ -34,19 +62,38 @@ void esp8266_send_at(char *str)
 }
 
 
+/**
+ * @brief 向 ESP8266 发送原始字节（不清空接收缓冲）。
+ *
+ * @param[in] buf 数据指针。
+ * @param[in] len 长度。
+ */
 void esp8266_send_bytes(uint8_t *buf,uint32_t len)
 {
 	usart3_send_bytes(buf,len);
 }
 
 
+/**
+ * @brief 向 ESP8266 发送以 \\0 结尾的字符串（不清空接收缓冲）。
+ *
+ * @param[in] buf 字符串指针。
+ */
 void esp8266_send_str(char *buf)
 {
 	usart3_send_str(buf);
 }
 
 
-/* 查找接收数据包中的字符串 */
+/**
+ * @brief 在 g_esp8266_rx_buf 中轮询查找子串，每 1 ms 递减超时计数。
+ *
+ * @param[in] str     期望出现的子串（如 "OK"）。
+ * @param[in] timeout 最大等待毫秒数（与 delay_ms(1) 次数对应）。
+ *
+ * @retval 0  在超时前找到子串。
+ * @retval -1 超时仍未找到。
+ */
 int32_t esp8266_find_str_in_rx_packet(char *str,uint32_t timeout)
 {
 	char *dest = str;
@@ -67,7 +114,12 @@ int32_t esp8266_find_str_in_rx_packet(char *str,uint32_t timeout)
 }
 
 
-/* 自检程序 */
+/**
+ * @brief 发送 AT\\r\\n 并等待响应中出现 "OK"。
+ *
+ * @retval 0  模块响应正常。
+ * @retval -1 超时未收到 OK。
+ */
 int32_t  esp8266_self_test(void)
 {
 	esp8266_send_at("AT\r\n");
@@ -76,16 +128,16 @@ int32_t  esp8266_self_test(void)
 }
 
 /**
- * 功能：连接热点
- * 参数：
- *         ssid:热点名
- *         pwd:热点密码
- * 返回值：
- *         连接结果,非0连接成功,0连接失败
- * 说明： 
- *         失败的原因有以下几种(UART通信和ESP8266正常情况下)
- *         1. WIFI名和密码不正确
- *         2. 路由器连接设备太多,未能给ESP8266分配IP
+ * @brief 使用 AT+CWMODE_CUR 与 AT+CWJAP_CUR 连接指定 AP（分片发送 SSID/密码以降低栈占用）。
+ *
+ * @param[in] ssid WiFi 名称。
+ * @param[in] pswd WiFi 密码。
+ *
+ * @retval 0  连接流程按代码路径成功结束。
+ * @retval -1 STATION 模式或首段应答失败。
+ * @retval -2 未在超时内收到期望的 OK/CONNECT 组合（SSID/密码错误、信道拥堵等）。
+ *
+ * @note 本工程 MQTT 路径主要使用 esp8266_mqtt_init 内的 AT+CWJAP；本函数保留作通用能力。
  */
 int32_t esp8266_connect_ap(char* ssid,char* pswd)
 {
@@ -119,7 +171,13 @@ int32_t esp8266_connect_ap(char* ssid,char* pswd)
 
 
 
-/* 退出透传模式 */
+/**
+ * @brief 发送 "+++" 序列并按规定间隔延时，退出 ESP8266 透传模式。
+ *
+ * @retval 0 固定返回 0（实际是否退出依赖模块状态与前后时序）。
+ *
+ * @note 前后各延时约 1 s，符合常见 AT 固件对 +++ 的要求。
+ */
 int32_t esp8266_exit_transparent_transmission (void)
 {
 	//退出透传模式，发送下一条AT指令要间隔1秒
@@ -133,7 +191,13 @@ int32_t esp8266_exit_transparent_transmission (void)
 	return 0;
 }
 
-/* 进入透传模式 */
+/**
+ * @brief 打开 CIPMODE=1 并发送 AT+CIPSEND，进入透传发送态（等待 '>' 提示符）。
+ *
+ * @retval 0  成功进入。
+ * @retval -1 CIPMODE 配置失败。
+ * @retval -2 未收到发送提示符 '>'。
+ */
 int32_t  esp8266_entry_transparent_transmission(void)
 {
 	//进入透传模式
@@ -152,18 +216,16 @@ int32_t  esp8266_entry_transparent_transmission(void)
 
 
 /**
- * 功能：使用指定协议(TCP/UDP)连接到服务器
- * 参数：
- *         mode:协议类型 "TCP","UDP"
- *         ip:目标服务器IP
- *         port:目标是服务器端口号
- * 返回值：
- *         连接结果,非0连接成功,0连接失败
- * 说明： 
- *         失败的原因有以下几种(UART通信和ESP8266正常情况下)
- *         1. 远程服务器IP和端口号有误
- *         2. 未连接AP
- *         3. 服务器端禁止添加(一般不会发生)
+ * @brief 使用 AT+CIPSTART 以 TCP/UDP 连接远端（分片发送以降低 sprintf 长串栈消耗）。
+ *
+ * @param[in] mode 协议名，如 "TCP" 或 "UDP"。
+ * @param[in] ip   域名或 IP 字符串。
+ * @param[in] port 端口号。
+ *
+ * @retval 0  在代码末尾路径返回 0 表示未命中错误分支（与 esp8266_find_str_in_rx_packet 逻辑配合）。
+ * @retval -1 在约定超时内未检测到 CONNECT 与 OK 的特定组合（详见实现）。
+ *
+ * @note MQTT AT 路径不经过本函数；本函数适用于传统 CIP 透传/TCP 调试。
  */
 int32_t esp8266_connect_server(char* mode,char* ip,uint16_t port)
 {
@@ -198,7 +260,12 @@ int32_t esp8266_connect_server(char* mode,char* ip,uint16_t port)
 	return 0;
 }
 
-/* 断开服务器 */
+/**
+ * @brief 发送 AT+CIPCLOSE 关闭当前 CIP 连接。
+ *
+ * @retval 0  未命中错误返回分支。
+ * @retval -1 在超时内未同时检测到 CLOSED 与 OK（详见实现）。
+ */
 int32_t esp8266_disconnect_server(void)
 {
 	esp8266_send_at("AT+CIPCLOSE\r\n");
@@ -211,7 +278,14 @@ int32_t esp8266_disconnect_server(void)
 }
 
 
-/* 使能多链接 */
+/**
+ * @brief 配置 AT+CIPMUX，打开或关闭多连接模式。
+ *
+ * @param[in] b 0 或 1，传入 AT+CIPMUX 参数。
+ *
+ * @retval 0  设置成功（收到 OK）。
+ * @retval -1 超时未收到 OK。
+ */
 int32_t esp8266_enable_multiple_id(uint32_t b)
 {
 
@@ -226,7 +300,14 @@ int32_t esp8266_enable_multiple_id(uint32_t b)
 	return 0;
 }
 
-/* 创建服务器 */
+/**
+ * @brief 在模块上创建 TCP 服务器（AT+CIPSERVER=1,port）。
+ *
+ * @param[in] port 监听端口。
+ *
+ * @retval 0  成功。
+ * @retval -1 超时未收到 OK。
+ */
 int32_t esp8266_create_server(uint16_t port)
 {
 	char buf[32]={0};
@@ -240,7 +321,14 @@ int32_t esp8266_create_server(uint16_t port)
 	return 0;
 }
 
-/* 关闭服务器 */
+/**
+ * @brief 关闭模块 TCP 服务器（AT+CIPSERVER=0,port）。
+ *
+ * @param[in] port 与创建时一致的端口参数（随 AT 固件版本可能仅 0 有效，以模块手册为准）。
+ *
+ * @retval 0  成功。
+ * @retval -1 超时未收到 OK。
+ */
 int32_t esp8266_close_server(uint16_t port)
 {
 	char buf[32]={0};
@@ -254,7 +342,14 @@ int32_t esp8266_close_server(uint16_t port)
 	return 0;
 }
 
-/* 回显打开或关闭 */
+/**
+ * @brief 发送 ATE1/ATE0 打开或关闭 AT 回显。
+ *
+ * @param[in] b 非 0 打开回显；0 关闭回显。
+ *
+ * @retval 0  成功。
+ * @retval -1 超时未收到 OK。
+ */
 int32_t esp8266_enable_echo(uint32_t b)
 {
 	if(b)
@@ -268,7 +363,14 @@ int32_t esp8266_enable_echo(uint32_t b)
 	return 0;
 }
 
-/* 复位 */
+/**
+ * @brief 发送 AT+RST 复位模块，延时后轮询 AT 直至收到 OK。
+ *
+ * @retval 0  复位后模块响应 AT 正常。
+ * @retval -1 多轮轮询后仍无 OK。
+ *
+ * @note 新版固件可能不再打印小写 ready；实现以轮询 AT 为准。
+ */
 int32_t esp8266_reset(void)
 {
 	uint32_t i;

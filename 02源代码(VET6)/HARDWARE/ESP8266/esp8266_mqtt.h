@@ -3,7 +3,11 @@
 
 #include "stm32f4xx.h"
 
-
+/*
+ * esp8266_mqtt.h —— OneNET 新版物模型（MQTT）与 ESP8266 AT 指令侧参数集中定义。
+ * 与 esp8266_mqtt.c 配合：由模块固件执行 MQTT 连接/订阅/发布，MCU 只发 AT 字符串。
+ * 修改产品、设备、鉴权 token 时仅需改本头文件宏，勿在多处硬编码。
+ */
 
 //此处是OneNET云服务器的公共实例登陆配置-------------------------------------注意修改为自己的云服务设备信息！！！！
 //==================== OneNET MQTT 配置 ====================
@@ -42,26 +46,71 @@
 //#define	MQTT_PUBLISH_TOPIC 		"/sys/g850YXdgU5r/smartdevice/thing/event/property/post"
 //#define MQTT_SUBSCRIBE_TOPIC 	"/sys/g850YXdgU5r/smartdevice/thing/service/property/set"
 
+/* 小端 32 位整数拆字节（若其它模块组 MQTT 负载需要按字节填充可用） */
 #define BYTE0(dwTemp)       (*( char *)(&dwTemp))
 #define BYTE1(dwTemp)       (*((char *)(&dwTemp) + 1))
 #define BYTE2(dwTemp)       (*((char *)(&dwTemp) + 2))
 #define BYTE3(dwTemp)       (*((char *)(&dwTemp) + 3))
-	
 
-//MQTT连接服务器
+
+/**
+ * @brief 使用 AT+MQTTUSERCFG 与 AT+MQTTCONN 连接 OneNET MQTT Broker。
+ *
+ * @param[in] client_id  MQTT 客户端 ID（本工程常为设备名）。
+ * @param[in] user_name  MQTT 用户名（本工程常为产品 ID）。
+ * @param[in] password   MQTT 密码（鉴权 token）。
+ *
+ * @retval 0  连接成功。
+ * @retval -1 配置或连接在重试后仍失败。
+ *
+ * @note 完整上电流程请优先使用 esp8266_mqtt_init()。
+ */
 extern int32_t mqtt_connect(char *client_id,char *user_name,char *password);
 
-//MQTT消息订阅
+/**
+ * @brief 订阅或取消订阅指定 MQTT 主题（AT+MQTTSUB / AT+MQTTUNSUB）。
+ *
+ * @param[in] topic   完整主题字符串。
+ * @param[in] qos     服务质量等级，0 或 1。
+ * @param[in] whether 1 表示订阅，0 表示取消订阅。
+ *
+ * @retval 0  操作成功。
+ * @retval -1 重试后仍失败。
+ */
 extern int32_t mqtt_subscribe_topic(char *topic,uint8_t qos,uint8_t whether);
 
-//MQTT消息发布
+/**
+ * @brief 向主题发布 UTF-8/ASCII 负载（内部选择 MQTTPUB 或 MQTTPUBRAW）。
+ *
+ * @param[in] topic   目标主题。
+ * @param[in] message 以 null 结尾的消息体，通常为 JSON。
+ * @param[in] qos     QoS 0 或 1。
+ *
+ * @retval >0 成功时为 strlen(message)。
+ * @retval 0  参数非法、长度为 0 或发布失败。
+ */
 extern uint32_t mqtt_publish_data(char *topic, char *message, uint8_t qos);
 
-//MQTT发送心跳包
+/**
+ * @brief 发送 AT+MQTTPING，维持与 Broker 的 MQTT 会话活跃。
+ *
+ * @note 是否仍被断开取决于模块 keepalive 与网络；本调用为单次 PING。
+ */
 extern void mqtt_send_heart(void);
 
+/**
+ * @brief ESP8266 串口与网络侧完整初始化：退出透传、AT、WiFi、MQTT 用户、连接与订阅。
+ *
+ * @retval 0   成功。
+ * @retval <0  分阶段错误码，含义见 esp8266_mqtt.c 中 esp8266_mqtt_init 注释。
+ */
 extern int32_t esp8266_mqtt_init(void);
 
+/**
+ * @brief 读取传感器与 GPIO，按 OneNET 物模型格式写入 g_mqtt_msg 并发布。
+ *
+ * @note 属性标识符须与云端物模型一致；QoS 在实现中固定为 1。
+ */
 extern void mqtt_report_devices_status(void);
 
 #endif

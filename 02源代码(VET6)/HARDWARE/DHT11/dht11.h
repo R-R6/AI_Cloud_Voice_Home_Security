@@ -2,7 +2,7 @@
 #define __DHT11_H
 
 /*	
-	温湿度模块引脚：PG9
+	温湿度模块引脚：PE9
 */
 //配置温湿度模块
 extern void dht11_init(void);

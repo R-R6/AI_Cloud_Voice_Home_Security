@@ -31,6 +31,7 @@
 		（4）播报当前安防状态（火焰预警、可燃气体是否超标）
 	9. 连接WiFi远程访问
 		通过WiFi模块远程访问阿里云服务器，利用MQTT协议远程获取或设置家居安防状态
+		（注：当前固件侧 MQTT 工程配置以 OneNET 新版物模型为准，见 esp8266_mqtt.h；上两行保留为原设计说明。）
 		（1）远程控制灯光亮灭
 		（2）温湿度状态
 		（3）火焰预警、可燃气体是否超标
@@ -49,10 +50,11 @@
 #include "includes.h"
 
 /* 全局变量 */
-//上传到mqtt服务器的温湿度
+/* 供 mqtt_report_devices_status 上报 OneNET 的温湿度（由 app_task_mqtt 从 g_queue_dht11 刷新） */
 float g_temp=0.0;
 float g_humi=0.0;
 
+/* 1：ESP8266 MQTT 已初始化完成，app_task_monitor 才允许向队列投递串口帧 */
 static volatile uint32_t g_esp8266_init=0;
 const uint8_t defalut_distance[1]={0x32}; 		// 默认安全距离 50mm
 volatile uint8_t g_alarm_distance = 50;            	// 全局报警距离，默认50mm（和默认值一致）
@@ -86,9 +88,9 @@ static TaskHandle_t app_task_mq2_handle = NULL;
 static TaskHandle_t app_task_dht11_handle = NULL;
 static TaskHandle_t app_task_bluetooth_handle = NULL;
 static TaskHandle_t app_task_aspro_handle = NULL;
-static TaskHandle_t g_app_task_mqtt_handle = NULL;
+static TaskHandle_t g_app_task_mqtt_handle = NULL;       /* 供 esp8266 任务在 MQTT 就绪后 vTaskResume */
 static TaskHandle_t g_app_task_esp8266_handle = NULL;
-static TaskHandle_t g_app_task_monitor_handle = NULL;
+static TaskHandle_t g_app_task_monitor_handle = NULL;    /* ESP8266 接收监控与入队 */
 
 
 /* 任务 硬件/任务初始化 */ 
@@ -133,13 +135,31 @@ static void app_task_bluetooth(void* pvParameters);
 /* 任务 语音识别 */ 
 static void app_task_aspro(void* pvParameters);  
 
-/* 任务 mqtt上报状态 */  
-static void app_task_mqtt(void* pvParameters); 
+/**
+ * @brief OneNET MQTT 周期心跳与属性上报任务（入口由 FreeRTOS 调度）。
+ *
+ * @param[in] pvParameters 未使用，创建时为 NULL。
+ *
+ * @note 创建后调用 vTaskSuspend(NULL) 自挂起，直至 app_task_esp8266 在 esp8266_mqtt_init 成功后 vTaskResume。
+ */
+static void app_task_mqtt(void* pvParameters);
 
-/* 任务 无线WiFi模块-esp8266*/  
-static void app_task_esp8266(void* pvParameters); 
+/**
+ * @brief ESP8266 WiFi/MQTT 初始化与云端 property/set 下行解析任务。
+ *
+ * @param[in] pvParameters 未使用。
+ *
+ * @note 成功后置 g_esp8266_init=1 并恢复 app_task_mqtt；栈在 task_tbl 中为 1536 字。
+ */
+static void app_task_esp8266(void* pvParameters);
 
-/* 任务 监控任务*/  
+/**
+ * @brief 监控 USART3 接收计数“静止”，将一帧 g_esp8266_rx_buf 投递到 g_queue_esp8266。
+ *
+ * @param[in] pvParameters 未使用。
+ *
+ * @note 仅在 g_esp8266_init 为真时入队，避免 MQTT 未就绪时填满队列。
+ */
 static void app_task_monitor(void* pvParameters); 
 
 
@@ -159,6 +179,7 @@ QueueHandle_t g_queue_led=NULL;
 QueueHandle_t g_queue_fire=NULL;
 QueueHandle_t g_queue_mq2=NULL;
 QueueHandle_t g_queue_dht11=NULL;
+/* 深度 3、每项 512B：承载 MQTT 下行 URC/负载拷贝，生产者 app_task_monitor，消费者 app_task_esp8266 */
 QueueHandle_t g_queue_esp8266=NULL;
 
 /* 二值信号量句柄 */
@@ -233,7 +254,11 @@ int main(void)
 }
 
 
-/* 任务列表 */
+/*
+ * 任务列表（与 app_task_init 中批量 xTaskCreate 对应）。
+ * MQTT 相关三项：mqtt(512)、esp8266(1536)、monitor(1024) 均为优先级 5；
+ * 与列表内其它任务同级，FreeRTOS 在相同优先级间按时间片轮转（configUSE_TIME_SLICING）。
+ */
 static const task_t task_tbl[] = {
 	{app_task_oled,        "app_task_oled",        512,    NULL,    5,  &app_task_oled_handle},
 	{app_task_rfid,        "app_task_rfid",        512,    NULL,    5,  &app_task_rfid_handle},
@@ -288,7 +313,7 @@ static void app_task_init(void* pvParameters)
 	g_queue_fire=xQueueCreate(5,32);
 	g_queue_mq2=xQueueCreate(5,32);	
 	g_queue_dht11=xQueueCreate(5,5);	
-	g_queue_esp8266=xQueueCreate(3,sizeof(g_esp8266_rx_buf));	
+	g_queue_esp8266=xQueueCreate(3,sizeof(g_esp8266_rx_buf)); /* 元素长度与 g_esp8266_rx_buf 一致 */	
 	
 	
 		  
@@ -1317,56 +1342,6 @@ static void app_task_sr04(void* pvParameters)
 	}
 }
 
-
-/* 任务 火焰传感器 */ 
-//static void app_task_lm393(void* pvParameters)
-//{
-//	u32 n=0;
-//	u32  adc_val;
-//	uint8_t beep_sta=0x00;
-//	uint8_t fire_sta[32];
-//	uint8_t last_fire_status = 0; // 记录上一次状态（用于检测变化）
-//	dgb_printf_safe("[app_task_lm393] create success\r\n");
-//	for(;;)
-//	{	
-//		adc_val=ADC_GetConversionValue(ADC1);  //获取转换的值
-//	
-//		 // dgb_printf_safe("fire_adc_val=%d\r\n",adc_val);  // 调试用
-//		if(n > 5)
-//		{
-//			// 正常情况下，火焰传感器在无火焰时 AO 输出电压较高（接近 3.3V，对应 ADC 值大），有火焰时电压降低（ADC 值减小）满量程（4095）
-//			if(adc_val <= 1000)
-//			{
-//				FIRE_D0=0;		//火警灯开
-//				beep_sta=0x01;	//蜂鸣器开
-//				//发送消息，超时时间为1000个节拍
-//				xQueueSend(g_queue_beep,&beep_sta,1000);
-//				vTaskDelay(1000);
-//				beep_sta=0x00;	//蜂鸣器关
-//				//发送消息，超时时间为1000个节拍
-//				xQueueSend(g_queue_beep,&beep_sta,1000);
-//						
-//				//发送火警状态
-//				strcpy((char *)fire_sta,"danger!!!");
-//				//发送消息，超时时间为1000个节拍
-//				xQueueSend(g_queue_fire,fire_sta,1000);
-//				
-//				dgb_printf_safe("fire alarm on!!!\r\n");
-//			}
-//			else
-//			{	
-//				FIRE_D0=1;		//火警灯关
-//				
-//				strcpy((char *)fire_sta,"safe");
-//				//发送消息，超时时间为1000个节拍
-//				xQueueSend(g_queue_fire,fire_sta,1000);
-//			}	
-//		}
-//		n++;
-//		vTaskDelay(500);
-//	}
-//}
-
 static void app_task_lm393(void* pvParameters)
 {
     u32 n = 0;
@@ -1439,73 +1414,6 @@ static void app_task_lm393(void* pvParameters)
         vTaskDelay(500); // 500ms采样一次
     }
 }
-
-
-//static void app_task_mq2(void* pvParameters)
-//{
-//    u32 n = 0;
-//    u32 adc_val;
-//    uint8_t beep_sta = 0x00;
-//    uint8_t mq2_sta[32];
-//    uint8_t last_mq2_status = 0; // 记录上一次状态（用于检测变化）
-
-//    dgb_printf_safe("[app_task_mq2] create success\r\n");
-
-//    for(;;)
-//    {
-//        adc_val = mq2_get_adc(); // 获取ADC值
-//				dgb_printf_safe("mq2_adc_val=%d\r\n",adc_val); // 调试
-//			
-//        if(n > 0) // 跳过第1次采样（稳定传感器）
-//        {
-//            // 1. 计算当前状态（0=safe，1=danger）
-//            uint8_t current_mq2_status = (adc_val >= 2000) ? 1 : 0;
-
-//            // 2. 仅当状态变化时，才更新缓存并释放信号量
-//            if(current_mq2_status != last_mq2_status)
-//            {
-//                // 加互斥锁：保护全局变量读写
-//                xSemaphoreTake(g_mutex_alarm, portMAX_DELAY);
-
-//                // 更新全局缓存
-//                g_mq2_status = current_mq2_status;
-//                last_mq2_status = current_mq2_status; // 更新历史状态
-
-//                // 释放互斥锁
-//                xSemaphoreGive(g_mutex_alarm);
-
-//                // 3. 释放信号量：同时通知蓝牙和语音任务（状态已更新）
-//                xSemaphoreGive(g_sem_mq2_bt);     // 通知蓝牙
-//                xSemaphoreGive(g_sem_mq2_asr);    // 通知语音
-
-//                dgb_printf_safe("烟雾状态变化：%s\r\n", current_mq2_status ? "danger" : "safe");
-//            }
-
-//            // 4. 原有硬件控制逻辑（蜂鸣器）
-//            if(current_mq2_status == 1) // 报警状态
-//            {
-//                beep_sta = 0x01; // 蜂鸣器开
-//                xQueueSend(g_queue_beep, &beep_sta, 1000);
-//                vTaskDelay(1000);
-//                beep_sta = 0x00; // 蜂鸣器关
-//                xQueueSend(g_queue_beep, &beep_sta, 1000);
-
-//                strcpy((char *)mq2_sta, "danger!!!");
-//								//发送消息，超时时间为1000个节拍
-//								xQueueSend(g_queue_mq2,mq2_sta,1000);
-//            }
-//            else // 安全状态
-//            {
-//                strcpy((char *)mq2_sta, "safe");
-//								//发送消息，超时时间为1000个节拍
-//								xQueueSend(g_queue_mq2,mq2_sta,1000);
-//            }
-//        }
-
-//        n = 1; // 从第2次循环开始，n始终>0
-//        vTaskDelay(500); // 500ms采样一次
-//    }
-//}
 
 static void app_task_mq2(void* pvParameters)
 {
@@ -2072,27 +1980,6 @@ static void app_task_aspro(void* pvParameters)
 				asr_send_str(buf);
 			}
 			
-//			//播报火警状态
-//			if(strstr((char *)g_usart2_rx_buf,"FIRE"))
-//			{		
-//				//获取火警状态
-//				xret=xQueueReceive(g_queue_fire,fire_sta,portMAX_DELAY);
-//				if(xret != pdTRUE)
-//					dgb_printf_safe("recv fail\r\n");
-//				
-//				//测试
-//				dgb_printf_safe("%s\r\n",fire_sta);
-//				
-//				//判断状态
-//				if(strstr((char *)fire_sta,"safe"))
-//					sprintf(buf,"3#");  // 火焰安全
-//				else
-//					sprintf(buf,"4#");  // 火焰不安全
-//					
-//				//发送火警状态给到语音模块播报
-//				asr_send_str(buf);
-//			}
-
 			// 查询火警状态：读全局缓存
 			if(strstr((char *)g_usart2_rx_buf,"FIRE"))
 			{		
@@ -2101,29 +1988,6 @@ static void app_task_aspro(void* pvParameters)
 				xSemaphoreGive(g_mutex_alarm);
 			}
 			
-//			//播报烟雾报警状态
-//			if(strstr((char *)g_usart2_rx_buf,"GAS"))
-//			{
-//				
-//				//获取气体报警状态
-//				xret=xQueueReceive(g_queue_mq2,mq2_sta,portMAX_DELAY);
-//				if(xret != pdTRUE)
-//					dgb_printf_safe("recv fail\r\n");
-//				
-//				//测试
-//				dgb_printf_safe("%s\r\n",mq2_sta);
-//				
-//				//判断状态
-//				if(strstr((char *)mq2_sta,"safe"))
-//					sprintf(buf,"5#");  // 烟雾安全→5#
-//				else
-//					sprintf(buf,"6#");  // 烟雾不安全→6#
-//				
-//				//发送气体报警状态给到语音模块播报
-//				asr_send_str(buf);
-//				
-//			}
-
 			// 查询烟雾状态：读全局缓存
 			if(strstr((char *)g_usart2_rx_buf,"GAS"))
 			{
@@ -2140,12 +2004,25 @@ static void app_task_aspro(void* pvParameters)
 }
 
 
-/* 任务 mqtt上报状态 */  
+/**
+ * @brief OneNET 侧 MQTT 业务任务：保活 PING、属性上报、周期性刷新温湿度全局量。
+ *
+ * @param[in] pvParameters FreeRTOS 任务参数，本任务未使用。
+ *
+ * @details
+ * - 首阶段 vTaskSuspend(NULL)，避免在 esp8266_mqtt_init 完成前调用 mqtt_send_heart / mqtt_report_devices_status。
+ * - 主循环约每秒：mqtt_send_heart()、mqtt_report_devices_status()，delay_ms(1000)。
+ * - delay_1s_cnt 每满 6：从 g_queue_dht11 以 pdMS_TO_TICKS(200) 接收 5 字节温湿度，更新 g_temp、g_humi；
+ *   超时沿用上次 buf，避免 DHT 故障时 xQueueReceive(portMAX_DELAY) 卡死本任务。
+ * - 火焰/烟雾状态由 lm393/mq2 任务写全局，本任务不再从队列同步，以免覆盖真实报警。
+ *
+ * @note 与 app_task_esp8266 通过 vTaskSuspend/vTaskResume 协作；任务优先级见 task_tbl。
+ */
 static void app_task_mqtt(void* pvParameters)
 {
 	BaseType_t xret;
 	uint32_t 	delay_1s_cnt=0;
-	uint8_t		buf[5]={20,05,56,8,20};
+	uint8_t		buf[5]={20,05,56,8,20}; /* 默认温湿度初值，队列超时则继续沿用 */
 	
 	dgb_printf_safe("[app_task_mqtt] create success\r\n");
 	
@@ -2159,10 +2036,10 @@ static void app_task_mqtt(void* pvParameters)
 	
 	for(;;)
 	{
-		//发送心跳包
+		/* AT+MQTTPING，减轻 Broker 断开闲置连接的概率 */
 		mqtt_send_heart();
 		
-		//上报设备状态
+		/* 发布到 MQTT_PUBLISH_TOPIC，负载格式见 esp8266_mqtt.c mqtt_report_devices_status */
 		mqtt_report_devices_status();	
 		
 		delay_ms(1000);
@@ -2188,7 +2065,19 @@ static void app_task_mqtt(void* pvParameters)
 }
 
 
-/* 任务 无线WiFi模块-esp8266*/  
+/**
+ * @brief ESP8266 串口接收“帧落稳”检测任务，将完整缓冲送入 g_queue_esp8266。
+ *
+ * @param[in] pvParameters FreeRTOS 任务参数，本任务未使用。
+ *
+ * @details
+ * - 每轮保存 g_esp8266_rx_cnt 快照，delay_ms(10) 后若计数未变且非零，认为一帧接收结束。
+ * - 在 g_esp8266_init 为真时 xQueueSend(g_queue_esp8266, g_esp8266_rx_buf, 1000)，
+ *   成功后清零 g_esp8266_rx_cnt 与接收缓冲。
+ * - 与 USART3 中断填充 g_esp8266_rx_buf 协作，避免在 esp8266_mqtt_init 长 AT 流程中误投递不完整帧。
+ *
+ * @note 队列深度 3、元素 512 字节；消费者为 app_task_esp8266。
+ */
 static void app_task_monitor(void* pvParameters)
 {
 	uint32_t esp8266_rx_cnt=0;
@@ -2220,7 +2109,20 @@ static void app_task_monitor(void* pvParameters)
 }
 
 
-/* 任务 监控任务*/ 
+/**
+ * @brief ESP8266 上电联网与 MQTT 建链任务，并解析云端下发的三路 LED 控制。
+ *
+ * @param[in] pvParameters FreeRTOS 任务参数，本任务未使用。
+ *
+ * @details
+ * - 循环调用 esp8266_mqtt_init() 直至返回 0，失败间隔 delay_ms(1000) 重试。
+ * - 成功后经 g_queue_beep 发四次节拍示意，打印成功日志。
+ * - vTaskResume(g_app_task_mqtt_handle) 启动周期上报；g_esp8266_init=1 允许 app_task_monitor 入队。
+ * - 主循环 xQueueReceive(g_queue_esp8266, buf, portMAX_DELAY)，在 buf 中扫描 JSON 片段：
+ *   0x31/0x22、0x32/0x22、0x33/0x22 分别对应 switch_led_1..3，根据 buf[i+3]=='1' 驱动 PF9/PF10/PE13。
+ *
+ * @note 下行解析为轻量字节匹配，与 OneNET property/set 载荷格式强相关；修改云端格式时需同步调整。
+ */
 static void app_task_esp8266(void* pvParameters)
 {
 	uint8_t beep_sta=0x00;
@@ -2237,7 +2139,7 @@ static void app_task_esp8266(void* pvParameters)
 		delay_ms(1000);
 	}
 	
-	//蜂鸣器嘀两声，示意连接成功
+	/* 蜂鸣器嘀两声，示意连接成功 */
 	beep_sta=0x01;	//蜂鸣器开
 	//发送消息，超时时间为1000个节拍
 	xQueueSend(g_queue_beep,&beep_sta,1000);
@@ -2259,8 +2161,10 @@ static void app_task_esp8266(void* pvParameters)
 
 	dgb_printf_safe("esp8266 connect oneNET with mqtt success\r\n");	
 	
+	/* 此时模块已连上 Broker，允许 mqtt 任务开始发 PING/属性上报 */
 	vTaskResume(g_app_task_mqtt_handle);
 	
+	/* 允许 app_task_monitor 将串口帧投递到本任务（此前投递无意义且浪费队列） */
 	g_esp8266_init=1;
 	
 	for(;;)
