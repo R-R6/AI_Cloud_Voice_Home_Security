@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 赣东学院本科毕业论文 md → Word 转换脚本
-依赖：pip install python-docx
-用法：python md_to_word.py
-输出：与本脚本同目录下生成 output.docx
+依赖：python -m pip install python-docx
+
+用法（任选其一）：
+  1）在「本脚本所在目录」打开终端：python md_to_word.py
+  2）在任意目录：python "完整路径\05毕业论文\md_to_word.py"
+  3）双击同目录下的 run_md_to_word.bat
+
+输出：与本脚本同目录下生成 OUT_FILE（默认文件名带「-修改版」后缀）
 """
 
 import re
@@ -20,8 +25,8 @@ import copy
 # 路径配置（脚本与 md 文件在同一目录）
 # ─────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-MD_FILE    = os.path.join(SCRIPT_DIR, "20222042236-吴兆国-基于FreeRTOS的智能居家安防系统.md")
-OUT_FILE   = os.path.join(SCRIPT_DIR, "20222042236-吴兆国-基于FreeRTOS的智能居家安防系统.docx")
+MD_FILE    = os.path.join(SCRIPT_DIR, "基于FreeRTOS的智能居家安防系统-吴兆国-初稿-5月13日.md")
+OUT_FILE   = os.path.join(SCRIPT_DIR, "基于FreeRTOS的智能居家安防系统-吴兆国-初稿-5月13日-修改版.docx")
 
 # ─────────────────────────────────────────────
 # 颜色常量
@@ -521,4 +526,38 @@ def convert(md_path, out_path):
 
 
 if __name__ == "__main__":
-    convert(MD_FILE, OUT_FILE)
+    import sys
+
+    exe = sys.executable
+    print("当前解释器:", exe)
+    print("Python 版本:", sys.version.split()[0])
+    if "WindowsApps" in exe.replace("/", "\\"):
+        print(
+            "\n【错误】检测到 Microsoft Store 占位 python，不会执行脚本。\n"
+            "处理办法（二选一）：\n"
+            "  1）设置 → 应用 → 高级应用设置 → 应用执行别名 → 关闭「python.exe」「python3.exe」；\n"
+            "     再从 https://www.python.org/downloads/ 安装 Python，勾选 Add python.exe to PATH。\n"
+            "  2）或管理员 PowerShell：winget install Python.Python.3.12\n"
+            "然后新开终端执行：python -m pip install python-docx\n"
+            "再运行本脚本。\n"
+        )
+        sys.exit(1)
+
+    try:
+        import docx  # noqa: F401
+    except ImportError:
+        print("【错误】未安装 python-docx，请执行：python -m pip install python-docx")
+        sys.exit(1)
+
+    if not os.path.isfile(MD_FILE):
+        print("【错误】找不到 MD 文件：", MD_FILE)
+        sys.exit(1)
+
+    try:
+        convert(MD_FILE, OUT_FILE)
+    except Exception as e:
+        print("【错误】转换失败：", e)
+        import traceback
+
+        traceback.print_exc()
+        sys.exit(1)

@@ -14,7 +14,7 @@ AT+MQTTUSERCFG=0,1,"test","y7l1o7W636","version=2018-10-31&res=products%2Fy7l1o7
 AT+MQTTCONN=0,"mqtts.heclouds.com",1883,0     
 
 # 向云端上报温度数据（23.0℃）
-AT+MQTTPUB=0,"$sys/y7l1o7W636/test/thing/property/post","{\"id\":\"123\"\,\"params\":{\"temp\":{\"value\":23.0}}}",1,0
+AT+MQTTPUB=0,"$sys/y7l1o7W636/test/thing/property/post","{\"id\":\"123\"\,\"params\":{\"temperature\":{\"value\":23.0}}}",1,0
 
 # 订阅云端属性设置主题（接收平台下发指令）
 AT+MQTTSUB=0,"$sys/y7l1o7W636/test/thing/property/set",0
