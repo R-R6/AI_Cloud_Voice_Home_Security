@@ -164,9 +164,10 @@ static void app_task_monitor(void* pvParameters);
 
 
 /* 互斥型信号量句柄 */
-SemaphoreHandle_t g_mutex_printf=NULL; 
+SemaphoreHandle_t g_mutex_printf=NULL;
 SemaphoreHandle_t g_mutex_card=NULL;   // 保护全局卡ID数组
 SemaphoreHandle_t g_mutex_alarm=NULL;  // 保护全局火警和烟雾报警状态
+SemaphoreHandle_t g_mutex_esp8266=NULL; /* ESP8266 AT/URC 互斥，见 esp8266_mqtt.c */
 
 /* 事件标志组句柄 */
 EventGroupHandle_t g_event_group=NULL;
@@ -295,6 +296,7 @@ static void app_task_init(void* pvParameters)
 	g_mutex_printf=xSemaphoreCreateMutex();	
 	g_mutex_card = xSemaphoreCreateMutex();  // 专门保护有效卡ID的互斥锁
 	g_mutex_alarm = xSemaphoreCreateMutex();
+	g_mutex_esp8266 = xSemaphoreCreateMutex();
 	
 	// 创建二值信号量（初始状态为“不可用”）
     g_sem_fire_bt = xSemaphoreCreateBinary();
@@ -582,7 +584,7 @@ static void app_task_rfid(void* pvParameters)
 					led_sta=0x0E;	//LED0开
 					//发送消息，超时时间为1000个节拍
 					xQueueSend(g_queue_led,&led_sta,1000);
-					delay_ms(100);
+					delay_ms(150);
 					led_sta=0x0F;	//全灭
 					//发送消息，超时时间为1000个节拍
 					xQueueSend(g_queue_led,&led_sta,1000);
@@ -624,7 +626,7 @@ static void app_task_rfid(void* pvParameters)
 					led_sta=0x0D;	//LED1开
 					//发送消息，超时时间为1000个节拍
 					xQueueSend(g_queue_led,&led_sta,1000);
-					delay_ms(100);
+					delay_ms(150);
 					led_sta=0x0F;	//全灭
 					//发送消息，超时时间为1000个节拍
 					xQueueSend(g_queue_led,&led_sta,1000);
@@ -883,6 +885,7 @@ static void app_task_key(void* pvParameters)
 	uint8_t is_main_menu = 1; // 初始状态是主菜单，所以默认1
 	
 	uint8_t beep_sta=0x00;
+	uint8_t led_sta=0x0F;
 	uint8_t fire_sta[32];
 	uint8_t mq2_sta[32];
 	uint8_t dht11_sta[5];
@@ -1061,9 +1064,11 @@ static void app_task_key(void* pvParameters)
 						}
 					}
 					
-					/* 停止蜂鸣器报警（返回图标选择页时取消所有报警） */
+					/* 停止蜂鸣器与 LED2 报警（返回图标选择页时取消超声波等报警指示） */
 					beep_sta=0x00;	//蜂鸣器关
 					xQueueSend(g_queue_beep,&beep_sta,1000);
+					led_sta=0x0F;	//LED 全灭（含 LED2 超声波报警灯）
+					xQueueSend(g_queue_led,&led_sta,1000);
 					
 					// 清屏，显示当前数据页对应的图标
 					oled.ctrl=OLED_CTRL_CLEAR;
@@ -1507,7 +1512,7 @@ static void app_task_dht11(void* pvParameters)
 			xQueueSend(g_queue_dht11,dht11_sta,1000);
 		}
 		else
-			printf("dht11 read error code %d\r\n",rt);
+			//printf("dht11 read error code %d\r\n",rt);
 		
 		vTaskDelay(6000);
 	}
@@ -2095,6 +2100,11 @@ static void app_task_monitor(void* pvParameters)
 		/* n毫秒后，发现g_esp8266_rx_cnt没有变化，则认为接收数据结束 */
 		if(g_esp8266_init && esp8266_rx_cnt && (esp8266_rx_cnt == g_esp8266_rx_cnt))
 		{
+			/* mqtt 任务发 AT 期间持有 g_mutex_esp8266，此处不抢缓冲、不清空 */
+			if (g_mutex_esp8266 != NULL &&
+			    xSemaphoreTake(g_mutex_esp8266, 0) != pdTRUE)
+				continue;
+
 			/* 发送消息，如果队列满了，超时时间为1000个节拍，如果1000个节拍都发送失败，函数直接返回 */
 			xReturn = xQueueSend(g_queue_esp8266,(void *)g_esp8266_rx_buf,1000);		
 			
@@ -2103,7 +2113,9 @@ static void app_task_monitor(void* pvParameters)
 			
 			g_esp8266_rx_cnt=0;
 			memset((void *)g_esp8266_rx_buf,0,sizeof(g_esp8266_rx_buf));
-		
+
+			if (g_mutex_esp8266 != NULL)
+				xSemaphoreGive(g_mutex_esp8266);
 		}	
 	}
 }
@@ -2118,17 +2130,18 @@ static void app_task_monitor(void* pvParameters)
  * - 循环调用 esp8266_mqtt_init() 直至返回 0，失败间隔 delay_ms(1000) 重试。
  * - 成功后经 g_queue_beep 发四次节拍示意，打印成功日志。
  * - vTaskResume(g_app_task_mqtt_handle) 启动周期上报；g_esp8266_init=1 允许 app_task_monitor 入队。
- * - 主循环 xQueueReceive(g_queue_esp8266, buf, portMAX_DELAY)，在 buf 中扫描 JSON 片段：
- *   0x31/0x22、0x32/0x22、0x33/0x22 分别对应 switch_led_1..3，根据 buf[i+3]=='1' 驱动 PF9/PF10/PE13。
+ * - 主循环 xQueueReceive(g_queue_esp8266, buf, portMAX_DELAY)，打印下行摘要并调用
+ *   mqtt_handle_property_set()：解析 switch_led_1..3，驱动 PE11/PE12/PE13，发布 property/set_reply。
  *
- * @note 下行解析为轻量字节匹配，与 OneNET property/set 载荷格式强相关；修改云端格式时需同步调整。
+ * @note 平台「属性设置」依赖 set_reply 应答，否则报设备响应超时；实现见 esp8266_mqtt.c。
  */
 static void app_task_esp8266(void* pvParameters)
 {
 	uint8_t beep_sta=0x00;
 	uint8_t buf[512];
-	BaseType_t xReturn = pdFALSE;	
-	uint32_t i;
+	BaseType_t xReturn = pdFALSE;
+	uint32_t n;
+	char preview[161];
 	
 	dgb_printf_safe("[app_task_esp8266] create success\r\n");
 	
@@ -2176,43 +2189,26 @@ static void app_task_esp8266(void* pvParameters)
 		{
 			dgb_printf_safe("[app_task_esp8266] xQueueReceive error code is %d\r\n", xReturn);
 			continue;
-		}	
-
-		for(i=0;i<sizeof(buf);i++)
-		{
-			//判断的关键字符是否为 1"
-			//核心数据，即{"switch_led_1":1}中的“1”
-			if((buf[i]==0x31) && (buf[i+1]==0x22))
-			{
-					//判断控制变量
-					if( buf[i+3]=='1' )
-						PFout(9)=0;//控制灯亮
-					else
-						PFout(9)=1;//控制灯灭
-			}	
-
-			//判断的关键字符是否为 2"
-			//核心数据，即{"switch_led_2":1}中的“1”
-			if((buf[i]==0x32) && (buf[i+1]==0x22))
-			{
-					//判断控制变量
-					if( buf[i+3]=='1' )
-						PFout(10)=0;//控制灯亮
-					else
-						PFout(10)=1;//控制灯灭
-			}
-
-			//判断的关键字符是否为 3"
-			//核心数据，即{"switch_led_3":1}中的“1”
-			if(buf[i]==0x33 && buf[i+1]==0x22)
-			{
-					//判断控制变量
-					if( buf[i+3]=='1' )
-						PEout(13)=0;//控制灯亮
-					else
-						PEout(13)=1;//控制灯灭
-			}				
 		}
+
+		/* 队列拷贝 512 字节，末尾补 \\0 便于 strstr / 调试打印 */
+		buf[sizeof(buf) - 1] = '\0';
+
+		/* 纯 ERROR 帧跳过；含 property/set 的混合帧仍需处理 */
+		if (strstr((char *)buf, "ERROR") != NULL &&
+		    strstr((char *)buf, "thing/property/set") == NULL)
+			continue;
+
+		n = (uint32_t)strlen((char *)buf);
+		if (n > 160U)
+			n = 160U;
+		memcpy(preview, buf, n);
+		preview[n] = '\0';
+		dgb_printf_safe("[app_task_esp8266] uart frame (%lu bytes): %s\r\n",
+			(unsigned long)strlen((char *)buf), preview);
+
+		/* 控灯 + 回复 set_reply，消除云平台「设备响应超时」 */
+		(void)mqtt_handle_property_set((char *)buf);
 	}
 }
 

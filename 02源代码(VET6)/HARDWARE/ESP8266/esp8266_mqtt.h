@@ -38,6 +38,9 @@
 // 订阅上报回执（云端 -> 设备）：接收数据上报的确认结果（可选，用于调试）
 #define MQTT_REPLY_TOPIC     "$sys/"MQTT_PRODUCT_ID"/"MQTT_DEVICE_NAME"/thing/property/post/reply"
 
+// 属性设置应答（设备 -> 云端）：平台「属性设置」后必须在超时前发布，否则报 10411
+#define MQTT_SET_REPLY_TOPIC "$sys/"MQTT_PRODUCT_ID"/"MQTT_DEVICE_NAME"/thing/property/set_reply"
+
 //此处是阿里云服务器的企业实例登陆配置-------------------------------------注意修改为自己的云服务设备信息！！！！
 //#define MQTT_BROKERADDRESS 		"iot-060a065f.mqtt.iothub.aliyuncs.com"
 //#define MQTT_CLIENTID 			"0001|securemode=3,signmethod=hmacsha1|"
@@ -112,5 +115,15 @@ extern int32_t esp8266_mqtt_init(void);
  * @note 属性标识符须与云端物模型一致；QoS 在实现中固定为 1。
  */
 extern void mqtt_report_devices_status(void);
+
+/**
+ * @brief 解析 OneNET property/set 下行：控灯并发布 set_reply。
+ *
+ * @param[in] payload 串口一帧内容（可含 +MQTTSUBRECV 头与 JSON），须以 \\0 结尾。
+ *
+ * @retval 1 已识别为属性设置并完成应答发布尝试。
+ * @retval 0 非属性设置帧，未处理。
+ */
+extern uint8_t mqtt_handle_property_set(char *payload);
 
 #endif

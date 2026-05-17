@@ -50,6 +50,8 @@
 extern SemaphoreHandle_t 	g_mutex_printf;
 extern SemaphoreHandle_t 	g_mutex_card;
 extern SemaphoreHandle_t    g_mutex_alarm;
+/* ESP8266 USART3 AT 收发互斥：避免 mqtt 上报与 monitor 入队抢 g_esp8266_rx_buf */
+extern SemaphoreHandle_t 	g_mutex_esp8266;
 
 extern EventGroupHandle_t 	g_event_group;
 

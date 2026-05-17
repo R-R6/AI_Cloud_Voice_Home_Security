@@ -22,9 +22,60 @@ static char s_esp8266_cmd_buf[512];
 /* MQTT 发布：转义后的 JSON、整行 AT（避免栈过大） */
 static char s_mqtt_esc[1100];
 static char s_mqtt_pub_line[1200];
+/* property/set_reply 专用短 JSON，避免与 g_mqtt_msg 周期上报互相覆盖 */
+static char s_mqtt_set_reply[96];
+/* PUBRAW 命令头放静态区，避免 app_task_mqtt 栈仅 512 字时局部 hdr[384] 溢出 */
+static char s_pubraw_hdr[384];
 
 /* ESP8266 单条 AT 输入长度上限约 256，超长则不要用 AT+MQTTPUB，直接 PUBRAW */
 #define ESP8266_AT_LINE_SAFE_MAX 230
+
+/**
+ * @brief 获取 ESP8266 串口互斥锁（与 app_task_monitor 共用）。
+ */
+static void esp8266_uart_lock(void)
+{
+	if (g_mutex_esp8266 != NULL)
+		(void)xSemaphoreTake(g_mutex_esp8266, portMAX_DELAY);
+}
+
+/**
+ * @brief 释放 ESP8266 串口互斥锁。
+ */
+static void esp8266_uart_unlock(void)
+{
+	if (g_mutex_esp8266 != NULL)
+		(void)xSemaphoreGive(g_mutex_esp8266);
+}
+
+/**
+ * @brief 判断是否为 OneNET property/set 的 MQTT 下行（+MQTTSUBRECV 主题段）。
+ */
+static int mqtt_frame_is_property_set(const char *frame)
+{
+	if (frame == NULL)
+		return 0;
+	if (strstr(frame, "thing/property/set_reply") != NULL)
+		return 0;
+	if (strstr(frame, "thing/property/set") != NULL)
+		return 1;
+	return 0;
+}
+
+/**
+ * @brief 从 +MQTTSUBRECV 整帧或纯 JSON 中定位 JSON 正文起始（首个 '{'）。
+ */
+static const char *mqtt_frame_json_body(const char *frame)
+{
+	const char *p;
+
+	if (frame == NULL)
+		return NULL;
+	p = strchr(frame, '{');
+	if (p != NULL)
+		return p;
+	return frame;
+}
 
 /**
  * @brief 在当前 USART3 接收快照中查找子串（不等待“静止”）。
@@ -146,10 +197,20 @@ static unsigned char ESP8266_SendCmdPolls(char *cmd, char *res, unsigned int pol
 				g_esp8266_rx_cnt_pre = 0;
 				return 0;
 			}
-			ESP8266_Clear();
-			g_esp8266_rx_cnt_pre = 0;
+			/*
+			 * 未匹配到 OK 时不能 Clear：缓冲里可能是 +MQTTSUBRECV(property/set)，
+			 * 清掉会导致云端下发丢失，平台报属性设置超时。
+			 */
+			g_esp8266_rx_cnt_pre = (uint16_t)g_esp8266_rx_cnt;
 		}
 		vTaskDelay(pdMS_TO_TICKS(10));
+	}
+
+	/* 超时：若已有 MQTT 下行 URC，留给 app_task_monitor 投递 */
+	if (strstr((const char *)g_esp8266_rx_buf, "+MQTTSUBRECV") == NULL)
+	{
+		ESP8266_Clear();
+		g_esp8266_rx_cnt_pre = 0;
 	}
 	return 1;
 }
@@ -349,7 +410,7 @@ int32_t mqtt_subscribe_topic(char *topic,uint8_t qos,uint8_t whether)
 /**
  * @brief 将 JSON 文本转义为可嵌入 AT+MQTTPUB 双引号参数内的形式。
  *
- * 对字符 \\ 与 " 前插入反斜杠，以满足 AT 字符串字段语法。
+ * 对 \\、" 前插入反斜杠；对逗号转义为 \\,（ESP8266 AT 以逗号分隔参数，否则 ERROR）。
  *
  * @param[in]  src    原始 JSON（UTF-8/ASCII）。
  * @param[out] dst    输出缓冲。
@@ -364,6 +425,14 @@ static int mqtt_at_escape_payload(const char *src, char *dst, size_t dst_sz)
 
 	for (i = 0; src[i] != '\0'; i++)
 	{
+		if (src[i] == ',')
+		{
+			if (j + 2 >= dst_sz)
+				return -1;
+			dst[j++] = '\\';
+			dst[j++] = ',';
+			continue;
+		}
 		if (src[i] == '\\' || src[i] == '"')
 		{
 			if (j + 2 >= dst_sz)
@@ -378,6 +447,90 @@ static int mqtt_at_escape_payload(const char *src, char *dst, size_t dst_sz)
 		return -1;
 	dst[j] = '\0';
 	return (int)j;
+}
+
+/**
+ * @brief 轮询等待 AT 发布成功（OK 或 +MQTTPUB:OK）。
+ *
+ * @param[in] polls 最大轮询次数（约 polls*10 ms）。
+ *
+ * @retval 0 成功。
+ * @retval 1 超时。
+ */
+static unsigned char mqtt_wait_publish_ok(unsigned int polls)
+{
+	unsigned int n = polls;
+
+	while (n--)
+	{
+		if (ESP8266_WaitRecive() == REV_OK)
+		{
+			if (strstr((const char *)g_esp8266_rx_buf, "OK") != NULL ||
+			    strstr((const char *)g_esp8266_rx_buf, "+MQTTPUB:OK") != NULL)
+				return 0;
+			if (strstr((const char *)g_esp8266_rx_buf, "+MQTTSUBRECV") == NULL)
+				ESP8266_Clear();
+			else
+				g_esp8266_rx_cnt_pre = (uint16_t)g_esp8266_rx_cnt;
+		}
+		vTaskDelay(pdMS_TO_TICKS(10));
+	}
+	return 1;
+}
+
+/**
+ * @brief 向 property/set_reply 发布短 JSON（清空 RX 后走 AT+MQTTPUB，不走 PUBRAW）。
+ *
+ * @param[in] id  与下行 property/set 中 id 一致。
+ *
+ * @retval >0 成功（返回 JSON 长度）。
+ * @retval 0  失败。
+ */
+static uint32_t mqtt_publish_set_reply(const char *id)
+{
+	int n;
+	int esc_len;
+	uint32_t msg_len;
+
+	if (id == NULL)
+		return 0u;
+
+	snprintf(s_mqtt_set_reply, sizeof(s_mqtt_set_reply),
+		"{\"id\":\"%s\",\"code\":200,\"msg\":\"success\"}", id);
+	msg_len = (uint32_t)strlen(s_mqtt_set_reply);
+
+	esp8266_uart_lock();
+	ESP8266_Clear();
+	g_esp8266_rx_cnt_pre = 0;
+
+	esc_len = mqtt_at_escape_payload(s_mqtt_set_reply, s_mqtt_esc, sizeof(s_mqtt_esc));
+	if (esc_len < 0)
+	{
+		esp8266_uart_unlock();
+		return 0u;
+	}
+
+	n = snprintf(s_mqtt_pub_line, sizeof(s_mqtt_pub_line),
+		"AT+MQTTPUB=0,\"%s\",\"%s\",0,0\r\n",
+		MQTT_SET_REPLY_TOPIC, s_mqtt_esc);
+	if (n <= 0 || (unsigned int)n >= sizeof(s_mqtt_pub_line))
+	{
+		esp8266_uart_unlock();
+		return 0u;
+	}
+
+	esp8266_send_bytes((uint8_t *)s_mqtt_pub_line, (uint32_t)n);
+
+	if (mqtt_wait_publish_ok(400U) == 0)
+	{
+		ESP8266_Clear();
+		g_esp8266_rx_cnt_pre = 0;
+		esp8266_uart_unlock();
+		return msg_len;
+	}
+
+	esp8266_uart_unlock();
+	return 0u;
 }
 
 /**
@@ -396,23 +549,27 @@ static int mqtt_at_escape_payload(const char *src, char *dst, size_t dst_sz)
  */
 static uint32_t mqtt_publish_pubraw(char *topic, char *message, uint8_t qos, unsigned int msg_len)
 {
-	char hdr[384];
 	unsigned int hl;
 	unsigned int polls;
 
-	hl = (unsigned int)snprintf(hdr, sizeof(hdr),
+	hl = (unsigned int)snprintf(s_pubraw_hdr, sizeof(s_pubraw_hdr),
 		"AT+MQTTPUBRAW=0,\"%s\",%u,%u,0\r\n",
 		topic, msg_len, (unsigned int)qos);
-	if (hl <= 0u || hl >= sizeof(hdr))
+	if (hl <= 0u || hl >= sizeof(s_pubraw_hdr))
 		return 0u;
 
-	ESP8266_Clear();
-	g_esp8266_rx_cnt_pre = 0;
-	esp8266_send_bytes((uint8_t *)hdr, hl);
+	/* 若缓冲中已有 MQTT 下行 URC，勿 Clear，留给 monitor 投递 property/set */
+	if (strstr((const char *)g_esp8266_rx_buf, "+MQTTSUBRECV") == NULL)
+	{
+		ESP8266_Clear();
+		g_esp8266_rx_cnt_pre = 0;
+	}
+	esp8266_send_bytes((uint8_t *)s_pubraw_hdr, hl);
 
 	for (polls = 0u; polls < 600u; polls++)
 	{
-		if (mqtt_rx_contains("\r\nERROR") || mqtt_rx_contains("\nERROR"))
+		if ((mqtt_rx_contains("\r\nERROR\r\n") || mqtt_rx_contains("ERROR\r\n")) &&
+		    !mqtt_rx_contains("+MQTTSUBRECV"))
 		{
 			dgb_printf_safe("MQTT Publish Failed (PUBRAW cmd ERROR)\r\n");
 			ESP8266_Clear();
@@ -428,23 +585,33 @@ static uint32_t mqtt_publish_pubraw(char *topic, char *message, uint8_t qos, uns
 	if (polls >= 600u)
 	{
 		dgb_printf_safe("MQTT Publish Failed (PUBRAW no OK/>)\r\n");
-		ESP8266_Clear();
+		if (strstr((const char *)g_esp8266_rx_buf, "+MQTTSUBRECV") == NULL)
+			ESP8266_Clear();
 		return 0u;
 	}
 
-	ESP8266_Clear();
-	g_esp8266_rx_cnt_pre = 0;
+	if (strstr((const char *)g_esp8266_rx_buf, "+MQTTSUBRECV") == NULL)
+	{
+		ESP8266_Clear();
+		g_esp8266_rx_cnt_pre = 0;
+	}
 	vTaskDelay(pdMS_TO_TICKS(30));
 	esp8266_send_bytes((uint8_t *)message, msg_len);
 
 	for (polls = 0u; polls < 800u; polls++)
 	{
-		if (mqtt_rx_contains("\r\nERROR") || mqtt_rx_contains("\nERROR"))
+		if ((mqtt_rx_contains("\r\nERROR\r\n") || mqtt_rx_contains("ERROR\r\n")) &&
+		    !mqtt_rx_contains("+MQTTSUBRECV"))
 			break;
 		if (mqtt_rx_contains("OK\r\n") || mqtt_rx_contains("\r\nOK"))
 		{
-			ESP8266_Clear();
-			g_esp8266_rx_cnt_pre = 0;
+			if (strstr((const char *)g_esp8266_rx_buf, "+MQTTSUBRECV") == NULL)
+			{
+				ESP8266_Clear();
+				g_esp8266_rx_cnt_pre = 0;
+			}
+			else
+				g_esp8266_rx_cnt_pre = (uint16_t)g_esp8266_rx_cnt;
 			return (uint32_t)msg_len;
 		}
 
@@ -452,7 +619,8 @@ static uint32_t mqtt_publish_pubraw(char *topic, char *message, uint8_t qos, uns
 	}
 
 	dgb_printf_safe("MQTT Publish Failed (PUBRAW finish)\r\n");
-	ESP8266_Clear();
+	if (strstr((const char *)g_esp8266_rx_buf, "+MQTTSUBRECV") == NULL)
+		ESP8266_Clear();
 	return 0u;
 }
 
@@ -473,6 +641,7 @@ uint32_t mqtt_publish_data(char *topic, char *message, uint8_t qos)
 {
 	unsigned int msg_len;
 	int n;
+	uint32_t rt = 0u;
 
 	if (topic == NULL || message == NULL)
 		return 0;
@@ -480,23 +649,185 @@ uint32_t mqtt_publish_data(char *topic, char *message, uint8_t qos)
 	if (msg_len == 0u || msg_len > sizeof(g_mqtt_msg))
 		return 0;
 
+	esp8266_uart_lock();
+
 	if (mqtt_at_escape_payload(message, s_mqtt_esc, sizeof(s_mqtt_esc)) < 0)
-		return mqtt_publish_pubraw(topic, message, qos, msg_len);
+	{
+		rt = mqtt_publish_pubraw(topic, message, qos, msg_len);
+		esp8266_uart_unlock();
+		return rt;
+	}
 
 	n = snprintf(s_mqtt_pub_line, sizeof(s_mqtt_pub_line),
 		"AT+MQTTPUB=0,\"%s\",\"%s\",%u,0\r\n",
 		topic, s_mqtt_esc, (unsigned int)qos);
 	if (n < 0 || (unsigned int)n >= sizeof(s_mqtt_pub_line))
-		return mqtt_publish_pubraw(topic, message, qos, msg_len);
+	{
+		rt = mqtt_publish_pubraw(topic, message, qos, msg_len);
+		esp8266_uart_unlock();
+		return rt;
+	}
 
 	/* 过长时发 AT+MQTTPUB 会被模块截断，表现为无 OK / 异常 */
 	if ((unsigned int)n <= ESP8266_AT_LINE_SAFE_MAX)
 	{
-		if (ESP8266_SendCmd(s_mqtt_pub_line, "OK") == 0)
-			return (uint32_t)msg_len;
+		if (ESP8266_SendCmdPolls(s_mqtt_pub_line, "OK", 800U) == 0)
+			rt = (uint32_t)msg_len;
+		else
+			rt = mqtt_publish_pubraw(topic, message, qos, msg_len);
+	}
+	else
+		rt = mqtt_publish_pubraw(topic, message, qos, msg_len);
+
+	esp8266_uart_unlock();
+	return rt;
+}
+
+/**
+ * @brief 从 property/set 载荷中提取平台下发的 id，用于 set_reply 回显。
+ *
+ * 支持 "id":"abc" 与 "id":123；若不存在 id 字段则默认 "1"。
+ */
+static void mqtt_extract_set_request_id(const char *payload, char *id_buf, unsigned id_buf_sz)
+{
+	const char *p;
+	unsigned j;
+
+	if (id_buf == NULL || id_buf_sz < 2U)
+		return;
+
+	id_buf[0] = '1';
+	id_buf[1] = '\0';
+
+	p = strstr(payload, "\"id\"");
+	if (p == NULL)
+		return;
+
+	p = strchr(p, ':');
+	if (p == NULL)
+		return;
+	p++;
+
+	while (*p == ' ' || *p == '\t')
+		p++;
+
+	if (*p == '\"')
+	{
+		p++;
+		j = 0U;
+		while (*p != '\0' && *p != '\"' && (j + 1U) < id_buf_sz)
+			id_buf[j++] = *p++;
+		id_buf[j] = '\0';
+	}
+	else
+	{
+		j = 0U;
+		while (*p != '\0' && *p != ',' && *p != '}' && (j + 1U) < id_buf_sz)
+			id_buf[j++] = *p++;
+		id_buf[j] = '\0';
 	}
 
-	return mqtt_publish_pubraw(topic, message, qos, msg_len);
+	if (id_buf[0] == '\0')
+	{
+		id_buf[0] = '1';
+		id_buf[1] = '\0';
+	}
+}
+
+/**
+ * @brief 解析单个 switch_led_x 的目标值（0/1），兼容扁平与 {"value":n} 两种物模型写法。
+ *
+ * @retval 0/1  解析成功。
+ * @retval -1   载荷中无该键或格式无法识别。
+ */
+static int mqtt_parse_switch_value(const char *payload, const char *key)
+{
+	const char *p;
+
+	p = strstr(payload, key);
+	if (p == NULL)
+		return -1;
+
+	p = strchr(p, ':');
+	if (p == NULL)
+		return -1;
+	p++;
+
+	while (*p == ' ' || *p == '\t')
+		p++;
+
+	/* 新版： "switch_led_1":{"value":1} */
+	if (*p == '{')
+	{
+		p = strstr(p, "value");
+		if (p == NULL)
+			return -1;
+		p = strchr(p, ':');
+		if (p == NULL)
+			return -1;
+		p++;
+		while (*p == ' ' || *p == '\t')
+			p++;
+	}
+
+	if (*p == '1')
+		return 1;
+	if (*p == '0')
+		return 0;
+
+	return -1;
+}
+
+/**
+ * @brief 解析 OneNET property/set 下行：更新三路 LED，并向 set_reply 主题应答。
+ *
+ * 平台同步属性设置会等待本应答，否则控制台报「设备响应超时」(10411)。
+ * LED：低电平点亮（与 mqtt_report_devices_status / 原 app_task_esp8266 一致）。
+ */
+uint8_t mqtt_handle_property_set(char *payload)
+{
+	int v1, v2, v3;
+	char id[16];
+	uint32_t pub_len;
+	const char *json;
+
+	if (payload == NULL)
+		return 0U;
+
+	/* 只处理 property/set 主题的下发，忽略 post/reply 等 URC */
+	if (!mqtt_frame_is_property_set(payload))
+		return 0U;
+
+	json = mqtt_frame_json_body(payload);
+	if (json == NULL)
+		return 0U;
+
+	if (strstr(json, "switch_led_1") == NULL &&
+	    strstr(json, "switch_led_2") == NULL &&
+	    strstr(json, "switch_led_3") == NULL)
+		return 0U;
+
+	v1 = mqtt_parse_switch_value(json, "switch_led_1");
+	v2 = mqtt_parse_switch_value(json, "switch_led_2");
+	v3 = mqtt_parse_switch_value(json, "switch_led_3");
+
+	if (v1 >= 0)
+		PEout(11) = (v1 != 0) ? 0 : 1;
+	if (v2 >= 0)
+		PEout(12) = (v2 != 0) ? 0 : 1;
+	if (v3 >= 0)
+		PEout(13) = (v3 != 0) ? 0 : 1;
+
+	mqtt_extract_set_request_id(json, id, sizeof(id));
+
+	/* 专用 AT+MQTTPUB 应答（带 \\, 转义 + 清 RX），避免走 PUBRAW 失败 */
+	pub_len = mqtt_publish_set_reply(id);
+
+	dgb_printf_safe("mqtt property/set: led1=%d led2=%d led3=%d, set_reply id=%s %s\r\n",
+		(v1 >= 0) ? v1 : -1, (v2 >= 0) ? v2 : -1, (v3 >= 0) ? v3 : -1,
+		id, (pub_len != 0U) ? "OK" : "FAIL");
+
+	return 1U;
 }
 
 /**
@@ -509,8 +840,8 @@ uint32_t mqtt_publish_data(char *topic, char *message, uint8_t qos)
  */
 void mqtt_report_devices_status(void)
 {
-	uint8_t led_1_sta = GPIO_ReadOutputDataBit(GPIOF,GPIO_Pin_9)  ? 0:1;
-	uint8_t led_2_sta = GPIO_ReadOutputDataBit(GPIOF,GPIO_Pin_10) ? 0:1;
+	uint8_t led_1_sta = GPIO_ReadOutputDataBit(GPIOE,GPIO_Pin_11) ? 0:1;
+	uint8_t led_2_sta = GPIO_ReadOutputDataBit(GPIOE,GPIO_Pin_12) ? 0:1;
 	uint8_t led_3_sta = GPIO_ReadOutputDataBit(GPIOE,GPIO_Pin_13) ? 0:1;
 
 	// OneNET新版物模型JSON格式
