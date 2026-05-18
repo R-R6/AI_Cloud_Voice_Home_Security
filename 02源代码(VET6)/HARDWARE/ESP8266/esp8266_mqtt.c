@@ -137,7 +137,7 @@ static void esp8266_dbg_rx(const char *tag)
  */
 void ESP8266_Clear(void)
 {
-	memset(g_esp8266_rx_buf, 0, sizeof(g_esp8266_rx_buf));
+	memset((void *)g_esp8266_rx_buf, 0, sizeof(g_esp8266_rx_buf));
 	g_esp8266_rx_cnt = 0;
 	g_esp8266_rx_cnt_pre = 0;
 }
@@ -290,7 +290,6 @@ void mqtt_init(uint8_t *prx,uint16_t rxlen,uint8_t *ptx,uint16_t txlen)
 int32_t mqtt_connect(char *client_id,char *user_name,char *password)
 {
 	uint32_t cnt = 3;  // 重试3次
-	uint32_t wait = 0;
 	char cmd_buf[256];
 	
 	// 步骤1: 配置MQTT用户参数（鉴权信息）

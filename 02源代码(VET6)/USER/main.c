@@ -88,6 +88,7 @@ static TaskHandle_t app_task_mq2_handle = NULL;
 static TaskHandle_t app_task_dht11_handle = NULL;
 static TaskHandle_t app_task_bluetooth_handle = NULL;
 static TaskHandle_t app_task_aspro_handle = NULL;
+static TaskHandle_t app_task_asr_alarm_handle = NULL;
 static TaskHandle_t g_app_task_mqtt_handle = NULL;       /* 供 esp8266 任务在 MQTT 就绪后 vTaskResume */
 static TaskHandle_t g_app_task_esp8266_handle = NULL;
 static TaskHandle_t g_app_task_monitor_handle = NULL;    /* ESP8266 接收监控与入队 */
@@ -133,7 +134,10 @@ static void app_task_dht11(void* pvParameters);
 static void app_task_bluetooth(void* pvParameters);  
 
 /* 任务 语音识别 */ 
-static void app_task_aspro(void* pvParameters);  
+static void app_task_aspro(void* pvParameters);
+
+/* 任务 火警/烟雾主动语音播报（仅消费 g_sem_*_asr） */
+static void app_task_asr_alarm(void* pvParameters);
 
 /**
  * @brief OneNET MQTT 周期心跳与属性上报任务（入口由 FreeRTOS 调度）。
@@ -274,6 +278,7 @@ static const task_t task_tbl[] = {
 	{app_task_dht11,       "app_task_dht11",       512,    NULL,    5,  &app_task_dht11_handle},
 	{app_task_bluetooth,   "app_task_bluetooth",   512,    NULL,    5,  &app_task_bluetooth_handle},
 	{app_task_aspro,       "app_task_aspro",       512,    NULL,    5,  &app_task_aspro_handle},
+	{app_task_asr_alarm,   "app_task_asr_alarm",   256,    NULL,    6,  &app_task_asr_alarm_handle},
 	{app_task_mqtt,        "app_task_mqtt",        512,    NULL,    5,  &g_app_task_mqtt_handle},
 	{app_task_esp8266,     "app_task_esp8266",     1536,   NULL,    5,  &g_app_task_esp8266_handle},
 	{app_task_monitor,     "app_task_monitor",     1024,   NULL,    5,  &g_app_task_monitor_handle},
@@ -408,7 +413,8 @@ static void app_task_init(void* pvParameters)
 	vTaskSuspend(app_task_rtc_handle);	
 	vTaskSuspend(app_task_key_handle);	
 	vTaskSuspend(app_task_sr04_handle);
-	vTaskSuspend(app_task_aspro_handle);	
+	vTaskSuspend(app_task_aspro_handle);
+	vTaskSuspend(app_task_asr_alarm_handle);
 	vTaskSuspend(app_task_bluetooth_handle);		
 //	vTaskSuspend(app_task_lm393_handle);
 //	vTaskSuspend(app_task_mq2_handle);	
@@ -536,7 +542,7 @@ static void app_task_rfid(void* pvParameters)
 {
 	u32 flag=1;		//无效卡和有效卡反应的标志位
 	u32 n=0;		
-	u8 i,status,card_size;
+	u8 i,status;
 	uint8_t led_sta=0x00;
 	uint8_t beep_sta=0x00;
 	oled_t oled;
@@ -551,7 +557,7 @@ static void app_task_rfid(void* pvParameters)
 			{
 				n=1;
 				MFRC522_Anticoll((u8 *)card_numberbuf);								//防撞处理			
-				card_size=MFRC522_SelectTag((u8 *)card_numberbuf);					//选卡
+				(void)MFRC522_SelectTag((u8 *)card_numberbuf);						//选卡
 				MFRC522_Auth(0x60, 4, (u8 *)card_key0Abuf, (u8 *)card_numberbuf);	//验卡
 						
 				//读卡状态显示，正常为0
@@ -614,7 +620,8 @@ static void app_task_rfid(void* pvParameters)
 					vTaskResume(app_task_key_handle);
 					vTaskResume(app_task_rtc_handle);
 					vTaskResume(app_task_bluetooth_handle);
-					vTaskResume(app_task_aspro_handle);	
+					vTaskResume(app_task_aspro_handle);
+					vTaskResume(app_task_asr_alarm_handle);
 					
 					/* 挂起rfid任务 */
 					vTaskSuspend(app_task_rfid_handle);	
@@ -1194,7 +1201,8 @@ static void app_task_key(void* pvParameters)
 					vTaskSuspend(app_task_rtc_handle);	
 					vTaskSuspend(app_task_key_handle);	
 					vTaskSuspend(app_task_sr04_handle);
-					vTaskSuspend(app_task_aspro_handle);	
+					vTaskSuspend(app_task_aspro_handle);
+					vTaskSuspend(app_task_asr_alarm_handle);
 					vTaskSuspend(app_task_bluetooth_handle);	
 					
 					// 重置状态变量（下次解锁后从主菜单开始）
@@ -1826,56 +1834,60 @@ static void app_task_bluetooth(void* pvParameters)
 }
 
 
-/* 任务 语音识别 */ 
+/* 任务 火警/烟雾主动语音播报 */
+static void app_task_asr_alarm(void* pvParameters)
+{
+	SemaphoreHandle_t sem_list[2];
+	BaseType_t fire_triggered;
+	BaseType_t mq2_triggered;
+	uint8_t fire_danger;
+	uint8_t mq2_danger;
+
+	sem_list[0] = g_sem_fire_asr;
+	sem_list[1] = g_sem_mq2_asr;
+
+	dgb_printf_safe("[app_task_asr_alarm] create success\r\n");
+
+	for(;;)
+	{
+		fire_triggered = xSemaphoreTake(sem_list[0], pdMS_TO_TICKS(50));
+		mq2_triggered = xSemaphoreTake(sem_list[1], pdMS_TO_TICKS(50));
+
+		if(fire_triggered == pdTRUE)
+		{
+			xSemaphoreTake(g_mutex_alarm, portMAX_DELAY);
+			fire_danger = g_fire_status;
+			xSemaphoreGive(g_mutex_alarm);
+			asr_notify_fire(fire_danger);
+			dgb_printf_safe("语音播报：火焰%s\r\n", fire_danger ? "危险" : "安全");
+		}
+
+		if(mq2_triggered == pdTRUE)
+		{
+			xSemaphoreTake(g_mutex_alarm, portMAX_DELAY);
+			mq2_danger = g_mq2_status;
+			xSemaphoreGive(g_mutex_alarm);
+			asr_notify_gas(mq2_danger);
+			dgb_printf_safe("语音播报：烟雾%s\r\n", mq2_danger ? "危险" : "安全");
+		}
+	}
+}
+
+/* 任务 语音识别（处理 ASRPRO 上行命令 TEMP/HUMI/FIRE/GAS 等） */
 static void app_task_aspro(void* pvParameters)
 {
 	uint8_t led_sta=0x00;
 	uint8_t dht11_sta[5]={0};
-//	uint8_t fire_sta[32]={0};
-//	uint8_t mq2_sta[32]={0};
 	
 	char buf[32]={0};
 	uint32_t value;
 	EventBits_t	EventBit;
 	BaseType_t xret;
 	
-	// 1. 信号量列表动态赋值
-    SemaphoreHandle_t sem_list_asr[2];
-    sem_list_asr[0] = g_sem_fire_asr;
-    sem_list_asr[1] = g_sem_mq2_asr;
-	
 	dgb_printf_safe("[app_task_aspro] create success\r\n");
 	
 	for(;;)
 	{
-		// 2. 逐个等待信号量（各50ms，总超时100ms）
-        BaseType_t fire_triggered = xSemaphoreTake(sem_list_asr[0], pdMS_TO_TICKS(50));
-        BaseType_t mq2_triggered = xSemaphoreTake(sem_list_asr[1], pdMS_TO_TICKS(50));
-
-        // 3. 火焰报警时播报
-        if(fire_triggered == pdTRUE)
-        {
-            xSemaphoreTake(g_mutex_alarm, portMAX_DELAY);
-            if(g_fire_status == 1)
-            {
-                asr_send_str("4#");
-                dgb_printf_safe("语音播报：火焰报警！\r\n");
-            }
-            xSemaphoreGive(g_mutex_alarm);
-        }
-
-        // 4. 烟雾报警时播报
-        if(mq2_triggered == pdTRUE)
-        {
-            xSemaphoreTake(g_mutex_alarm, portMAX_DELAY);
-            if(g_mq2_status == 1)
-            {
-                asr_send_str("6#");
-                dgb_printf_safe("语音播报：烟雾报警！\r\n");
-            }
-            xSemaphoreGive(g_mutex_alarm);
-        }
-		
 		if(g_usart2_rx_end) 
 		{
 			dgb_printf_safe("%s\r\n",g_usart2_rx_buf);
@@ -1962,11 +1974,7 @@ static void app_task_aspro(void* pvParameters)
 					dgb_printf_safe("recv fail\r\n");
 				
 				dgb_printf_safe("T:%d.%d\r\n",dht11_sta[2],dht11_sta[3]);
-				
-				sprintf(buf,"%d#",dht11_sta[2]);
-				
-				//发送温度给到语音模块播报
-				asr_send_str(buf);
+				asr_play_temp(dht11_sta[2]);
 			}
 			
 			//播报湿度
@@ -1978,18 +1986,14 @@ static void app_task_aspro(void* pvParameters)
 					dgb_printf_safe("recv fail\r\n");
 				
 				dgb_printf_safe("H:%d.%d\r\n",dht11_sta[0],dht11_sta[1]);
-				
-				sprintf(buf,"%d#",dht11_sta[0]);
-				
-				//发送湿度给到语音模块播报
-				asr_send_str(buf);
+				asr_play_humi(dht11_sta[0]);
 			}
 			
 			// 查询火警状态：读全局缓存
 			if(strstr((char *)g_usart2_rx_buf,"FIRE"))
 			{		
 				xSemaphoreTake(g_mutex_alarm, portMAX_DELAY);
-				asr_send_str(g_fire_status ? "4#" : "3#"); // 1=danger→4#，0=safe→3#
+				asr_notify_fire(g_fire_status);
 				xSemaphoreGive(g_mutex_alarm);
 			}
 			
@@ -1997,13 +2001,17 @@ static void app_task_aspro(void* pvParameters)
 			if(strstr((char *)g_usart2_rx_buf,"GAS"))
 			{
 				xSemaphoreTake(g_mutex_alarm, portMAX_DELAY);
-				asr_send_str(g_mq2_status ? "6#" : "5#"); // 1=danger→6#，0=safe→5#
+				asr_notify_gas(g_mq2_status);
 				xSemaphoreGive(g_mutex_alarm);
 			}
 			
 			g_usart2_rx_end=0;
 			g_usart2_rx_cnt=0;
 			memset((void *)g_usart2_rx_buf,0,sizeof(g_usart2_rx_buf));
+		}
+		else
+		{
+			vTaskDelay(pdMS_TO_TICKS(20));
 		}
 	}
 }
