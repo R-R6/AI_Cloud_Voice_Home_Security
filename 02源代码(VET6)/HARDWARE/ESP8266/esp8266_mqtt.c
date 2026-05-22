@@ -31,9 +31,9 @@ static char s_pubraw_hdr[384];
 #define ESP8266_AT_LINE_SAFE_MAX 230
 
 /**
- * @brief 获取 ESP8266 串口互斥锁（与 app_task_monitor 共用）。
+ * @brief 获取 ESP8266 串口互斥锁（与 app_task_monitor / nettime 共用）。
  */
-static void esp8266_uart_lock(void)
+void esp8266_uart_lock(void)
 {
 	if (g_mutex_esp8266 != NULL)
 		(void)xSemaphoreTake(g_mutex_esp8266, portMAX_DELAY);
@@ -42,7 +42,7 @@ static void esp8266_uart_lock(void)
 /**
  * @brief 释放 ESP8266 串口互斥锁。
  */
-static void esp8266_uart_unlock(void)
+void esp8266_uart_unlock(void)
 {
 	if (g_mutex_esp8266 != NULL)
 		(void)xSemaphoreGive(g_mutex_esp8266);
@@ -178,7 +178,7 @@ unsigned char ESP8266_WaitRecive(void)
  * @retval 0 在超时前收到包含 res 的响应。
  * @retval 1 超时未匹配到 res。
  */
-static unsigned char ESP8266_SendCmdPolls(char *cmd, char *res, unsigned int polls)
+unsigned char ESP8266_SendCmdPolls(char *cmd, char *res, unsigned int polls)
 {
 	unsigned int timeOut = polls;
 
@@ -249,7 +249,9 @@ void mqtt_disconnect()
  */
 void mqtt_send_heart(void)
 {
+	esp8266_uart_lock();
 	ESP8266_SendCmd("AT+MQTTPING\r\n", "OK");
+	esp8266_uart_unlock();
 }
 
 /**
@@ -961,6 +963,10 @@ int32_t esp8266_mqtt_init(void)
 		return -5;
 	}
 	dgb_printf_safe("esp8266 WiFi GOT IP\r\n");
+	/* 多连接：MQTT 走 AT+MQTT*，HTTP 对时用 link 1，避免单连接模式抢占会话 */
+	if (ESP8266_SendCmdPolls("AT+CIPMUX=1\r\n", "OK", 200U) != 0)
+		dgb_printf_safe("esp8266 CIPMUX=1 warn (nettime may fail)\r\n");
+	delay_ms(200);
 	/* 协议栈稳定；仅复位 MCU 时模块侧 MQTT  session 可能仍在，必须先清理 */
 	delay_ms(800);
 	for (retry = 0; retry < 3; retry++)

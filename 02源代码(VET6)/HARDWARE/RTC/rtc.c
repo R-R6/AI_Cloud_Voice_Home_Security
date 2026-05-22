@@ -40,19 +40,18 @@ void rtc_init(void)
 	RTC_InitStructure.RTC_HourFormat = RTC_HourFormat_24;	//24小时格式
 	RTC_Init(&RTC_InitStructure);
 
-	/* Set the date: 2025年11月5号星期一 */
-	RTC_DateStructure.RTC_Year = 0x25;
-	RTC_DateStructure.RTC_Month = 0x11;
-	RTC_DateStructure.RTC_Date = 0x05;
-	RTC_DateStructure.RTC_WeekDay = 0x01;
+	/* 占位初值：联网后由 esp8266_nettime_sync() 写入北京时间，勿再写死演示日期 */
+	RTC_DateStructure.RTC_Year    = 0x00;
+	RTC_DateStructure.RTC_Month   = 0x01;
+	RTC_DateStructure.RTC_Date    = 0x01;
+	RTC_DateStructure.RTC_WeekDay = 0x06;
 	RTC_SetDate(RTC_Format_BCD, &RTC_DateStructure);
-	
-	/* Set the time to 13h 30m 00s PM */
-	RTC_TimeStructure.RTC_H12     = RTC_H12_PM;
-	RTC_TimeStructure.RTC_Hours   = 0x13;
-	RTC_TimeStructure.RTC_Minutes = 0x30;
-	RTC_TimeStructure.RTC_Seconds = 0x00d; 
-	RTC_SetTime(RTC_Format_BCD, &RTC_TimeStructure); 
+
+	RTC_TimeStructure.RTC_H12     = RTC_H12_AM;
+	RTC_TimeStructure.RTC_Hours   = 0x00;
+	RTC_TimeStructure.RTC_Minutes = 0x00;
+	RTC_TimeStructure.RTC_Seconds = 0x00;
+	RTC_SetTime(RTC_Format_BCD, &RTC_TimeStructure);
 	
 	//关闭唤醒功能
 	RTC_WakeUpCmd(DISABLE);
@@ -86,7 +85,14 @@ void rtc_init(void)
 	NVIC_Init(&NVIC_InitStructure);	
 }
 
-
+/**
+ * @brief 通知 app_task_rtc 立即从 RTC 寄存器刷新 OLED 时间/日期（网络对时后调用）。
+ */
+void rtc_notify_oled_refresh(void)
+{
+	if (g_event_group != NULL)
+		(void)xEventGroupSetBits(g_event_group, (EventBits_t)EVENT_GROUP_RTC_WAKEUP);
+}
 
 //实时时钟的中断服务函数
 void RTC_WKUP_IRQHandler(void)

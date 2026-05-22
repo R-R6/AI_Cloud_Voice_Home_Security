@@ -37,6 +37,7 @@
 #include "aspro.h"			//语音设别模块
 #include "esp8266.h"		//无线WiFi模块-esp8266
 #include "esp8266_mqtt.h"	//esp8266的mqtt协议封装
+#include "esp8266_nettime.h"	//esp8266 HTTP 网络对时
 
 /* 宏定义 */
 #define EVENT_GROUP_RTC_WAKEUP		0x01

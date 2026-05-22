@@ -1,4 +1,4 @@
-﻿#include "includes.h"
+#include "includes.h"
 
 /*
  * 底层收发：USART3（硬件接 ESP8266 TX/RX，见 esp8266_init 注释）。
@@ -15,7 +15,7 @@ void usart3_send_str(char *str)
 {
 	usart_send_str(USART3,str);
 }
-
+ 
 
 /**
  * @brief 通过 USART3 发送指定长度字节流。

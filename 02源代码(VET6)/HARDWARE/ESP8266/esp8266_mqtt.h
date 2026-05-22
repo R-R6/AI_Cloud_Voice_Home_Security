@@ -126,4 +126,13 @@ extern void mqtt_report_devices_status(void);
  */
 extern uint8_t mqtt_handle_property_set(char *payload);
 
+/** 供 esp8266_nettime.c 等模块复用 AT 轮询与接收判稳 */
+extern void ESP8266_Clear(void);
+extern unsigned char ESP8266_WaitRecive(void);
+extern unsigned char ESP8266_SendCmdPolls(char *cmd, char *res, unsigned int polls);
+
+/** USART3 AT 互斥（HTTP 对时 / MQTT 上报 / PING 不可并发） */
+extern void esp8266_uart_lock(void);
+extern void esp8266_uart_unlock(void);
+
 #endif

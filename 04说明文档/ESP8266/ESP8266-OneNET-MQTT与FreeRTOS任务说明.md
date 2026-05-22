@@ -29,7 +29,7 @@
 
 - 循环调用 **`esp8266_mqtt_init()`** 直至成功，完成：退出透传、AT 同步、STA、DHCP、`CWJAP`、`MQTTCLEAN`、`MQTTUSERCFG`、`MQTTCONN`、订阅 `property/set` 与可选 `post/reply`。
 - 成功后蜂鸣提示，执行 **`vTaskResume(g_app_task_mqtt_handle)`**，再置 **`g_esp8266_init = 1`**。
-- 之后阻塞在 **`xQueueReceive(g_queue_esp8266, …, portMAX_DELAY)`**，从队列取出由监控任务打包的一帧串口数据，按简单字节模式解析云端下发的 LED 控制。
+- 之后阻塞在 **`xQueueReceive(g_queue_esp8266, …, portMAX_DELAY)`**，从队列取串口帧，调用 **`mqtt_handle_property_set()`** 解析 `property/set` 并控灯、发 `set_reply`（详见 [OneNET云端下行控灯与set_reply应答说明.md](./OneNET云端下行控灯与set_reply应答说明.md)）。
 
 ### 3.2 `app_task_mqtt`（栈 512，优先级 5）
 
@@ -91,6 +91,12 @@
 ```
 
 上行属性：`app_task_mqtt` → `mqtt_report_devices_status` → `mqtt_publish_data` → USART3 AT → ESP8266 → OneNET。
+
+**上行发布细节**（`topic` 从哪来、`snprintf` 的 `n`、缓冲区 1200 与 AT 行 230 字节、`mqtt_publish_data` 逐句逻辑）见：  
+[ESP8266-MQTT属性上报与mqtt_publish_data说明.md](./ESP8266-MQTT属性上报与mqtt_publish_data说明.md)。
+
+**下行控灯与 set_reply** 见：  
+[OneNET云端下行控灯与set_reply应答说明.md](./OneNET云端下行控灯与set_reply应答说明.md)。
 
 ---
 

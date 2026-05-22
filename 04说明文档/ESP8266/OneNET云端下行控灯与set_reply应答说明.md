@@ -429,9 +429,12 @@ buf（整帧串口文本，含 +MQTTSUBRECV 头）
 
 | 文档 | 内容 |
 |------|------|
+| [ESP8266-MQTT属性上报与mqtt_publish_data说明.md](./ESP8266-MQTT属性上报与mqtt_publish_data说明.md) | **上行**：`mqtt_publish_data`、`topic`、`n`/`snprintf`、1200 与 230 字节 |
 | [esp8266AT指令.md](./esp8266AT指令.md) | 不用 MCU，只用 USB-TTL 手工发 AT、练 `\,` 与 PUBRAW |
 | [ESP8266-OneNET-MQTT与FreeRTOS任务说明.md](./ESP8266-OneNET-MQTT与FreeRTOS任务说明.md) | mqtt / esp8266 / monitor 三任务与队列 |
 | [FreeRTOS调试打印与ESP8266联调问题总结.md](./FreeRTOS调试打印与ESP8266联调问题总结.md) | 互斥量、调试串口、RX 被清空等联调坑 |
+
+**阅读分工**：本文档侧重 **云 → 设备**（`property/set` / `set_reply`）；周期 **设备 → 云** 上报见上一行新文档。
 
 ---
 

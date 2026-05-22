@@ -207,6 +207,8 @@ AT+MQTTPUBRAW=0,"$sys/y7l1o7W636/test/thing/property/post",52,1,0
 {"id":"123","params":{"temperature":{"value":23.0}}}}
 ```
 
+**与 MCU 工程的对应**：周期上报在代码里由 `mqtt_report_devices_status()` → `mqtt_publish_data(MQTT_PUBLISH_TOPIC, …)` 自动完成；`topic`、`snprintf` 返回值 `n`、缓冲区 **1200** 与 **230 字节** 等说明见 [ESP8266-MQTT属性上报与mqtt_publish_data说明.md](./ESP8266-MQTT属性上报与mqtt_publish_data说明.md)。
+
 ---
 
 ## 8. 第 4 步：订阅主题（云 → 设备）

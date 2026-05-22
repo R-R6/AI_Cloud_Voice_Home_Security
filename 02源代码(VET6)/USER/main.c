@@ -619,6 +619,7 @@ static void app_task_rfid(void* pvParameters)
 					/* 恢复rtc、key、bluetooth、aspro任务 */
 					vTaskResume(app_task_key_handle);
 					vTaskResume(app_task_rtc_handle);
+					rtc_notify_oled_refresh();
 					vTaskResume(app_task_bluetooth_handle);
 					vTaskResume(app_task_aspro_handle);
 					vTaskResume(app_task_asr_alarm_handle);
@@ -825,7 +826,7 @@ static void app_task_rtc(void* pvParameters)
 
 		if(EventBit & EVENT_GROUP_RTC_WAKEUP)
 		{	
-			/* RTC_GetTime，获取时间 */
+			/* 时间/日期由 esp8266_nettime_sync 写入 RTC（网络北京时间），此处仅刷新 OLED */
 			RTC_GetTime(RTC_Format_BCD, &RTC_TimeStructure); 
 			/* 格式化字符串 */
 			sprintf((char *)time_buf,"%02x:%02x:%02x",RTC_TimeStructure.RTC_Hours,RTC_TimeStructure.RTC_Minutes,RTC_TimeStructure.RTC_Seconds);
@@ -2035,6 +2036,7 @@ static void app_task_mqtt(void* pvParameters)
 {
 	BaseType_t xret;
 	uint32_t 	delay_1s_cnt=0;
+	uint32_t	nettime_sec_cnt=0;
 	uint8_t		buf[5]={20,05,56,8,20}; /* 默认温湿度初值，队列超时则继续沿用 */
 	
 	dgb_printf_safe("[app_task_mqtt] create success\r\n");
@@ -2049,6 +2051,13 @@ static void app_task_mqtt(void* pvParameters)
 	
 	for(;;)
 	{
+		/* 周期对时（首次对时在 app_task_esp8266 连上 MQTT 后已完成） */
+		if (nettime_sec_cnt >= ESP8266_NETTIME_SYNC_INTERVAL_S)
+		{
+			(void)esp8266_nettime_sync();
+			nettime_sec_cnt = 0;
+		}
+
 		/* AT+MQTTPING，减轻 Broker 断开闲置连接的概率 */
 		mqtt_send_heart();
 		
@@ -2056,7 +2065,8 @@ static void app_task_mqtt(void* pvParameters)
 		mqtt_report_devices_status();	
 		
 		delay_ms(1000);
-		
+		nettime_sec_cnt++;
+
 		delay_1s_cnt++;
 		
 		if(delay_1s_cnt >= 6 )
@@ -2180,11 +2190,14 @@ static void app_task_esp8266(void* pvParameters)
 	//发送消息，超时时间为1000个节拍
 	xQueueSend(g_queue_beep,&beep_sta,1000);	
 
-	dgb_printf_safe("esp8266 connect oneNET with mqtt success\r\n");	
-	
+	dgb_printf_safe("esp8266 connect oneNET with mqtt success\r\n");
+
+	/* MQTT 已连通，立即 HTTP 对时（早于 mqtt 任务首包上报，避免长时间显示占位 RTC） */
+	(void)esp8266_nettime_sync();
+
 	/* 此时模块已连上 Broker，允许 mqtt 任务开始发 PING/属性上报 */
 	vTaskResume(g_app_task_mqtt_handle);
-	
+
 	/* 允许 app_task_monitor 将串口帧投递到本任务（此前投递无意义且浪费队列） */
 	g_esp8266_init=1;
 	
