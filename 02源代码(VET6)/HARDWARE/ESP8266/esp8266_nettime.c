@@ -1,8 +1,8 @@
 #include "includes.h"
 
 /*
- * ESP8266 HTTP ÍøÂç¶ÔÊ±£ºGET www.beijing-time.org/time15.asp
- * Ê¹ÓÃ CIPMUX=1 ÏÂ link 1 ¶ÌÁ¬½Ó£¬Óë AT+MQTT* ²¢ĞĞ£»³Ö esp8266_uart_lock ·ÃÎÊ´®¿Ú¡£
+ * ESP8266 HTTP ç½‘ç»œå¯¹æ—¶ï¼šGET www.beijing-time.org/time15.asp
+ * ä½¿ç”¨ CIPMUX=1 ä¸‹ link 1 çŸ­è¿æ¥ï¼Œä¸ AT+MQTT* å¹¶è¡Œï¼›æŒ esp8266_uart_lock è®¿é—®ä¸²å£ã€‚
  */
 
 #define NETTIME_LINK_ID   1
@@ -18,9 +18,9 @@ static char s_cmd[96];
 static char s_date_line[80];
 
 /**
- * @brief ÔÚ g_esp8266_rx_buf[g_esp8266_rx_cnt] ´¦²¹ '\0'£¬±ãÓÚ strstr/sscanf ½âÎö¡£
+ * @brief åœ¨ g_esp8266_rx_buf[g_esp8266_rx_cnt] å¤„è¡¥ '\0'ï¼Œä¾¿äº strstr/sscanf è§£æã€‚
  *
- * @param ÎŞ
+ * @param æ— 
  */
 static void nettime_rx_terminate(void)
 {
@@ -32,10 +32,10 @@ static void nettime_rx_terminate(void)
 }
 
 /**
- * @brief ½« 0~99 µÄÊ®½øÖÆÊı×ªÎª BCD£¨¹© RTC_SetTime/SetDate Ê¹ÓÃ£©¡£
+ * @brief å°† 0~99 çš„åè¿›åˆ¶æ•°è½¬ä¸º BCDï¼ˆä¾› RTC_SetTime/SetDate ä½¿ç”¨ï¼‰ã€‚
  *
- * @param[in] v Ê®½øÖÆÊıÖµ£¨0~99£©
- * @return BCD ±àÂë×Ö½Ú
+ * @param[in] v åè¿›åˆ¶æ•°å€¼ï¼ˆ0~99ï¼‰
+ * @return BCD ç¼–ç å­—èŠ‚
  */
 static uint8_t dec_to_bcd(uint8_t v)
 {
@@ -43,10 +43,10 @@ static uint8_t dec_to_bcd(uint8_t v)
 }
 
 /**
- * @brief ½« HTTP Date ĞĞÖĞµÄÈı×ÖÄ¸ÔÂ·İËõĞ´×ªÎª 1~12¡£
+ * @brief å°† HTTP Date è¡Œä¸­çš„ä¸‰å­—æ¯æœˆä»½ç¼©å†™è½¬ä¸º 1~12ã€‚
  *
- * @param[in] m Ö¸Ïò "Jan" µÈ 3 ×Ö·ûÔÂ·İ×Ö·û´®
- * @return 1~12 ±íÊ¾ÔÂ·İ£»-1 ±íÊ¾ÎŞ·¨Ê¶±ğ
+ * @param[in] m æŒ‡å‘ "Jan" ç­‰ 3 å­—ç¬¦æœˆä»½å­—ç¬¦ä¸²
+ * @return 1~12 è¡¨ç¤ºæœˆä»½ï¼›-1 è¡¨ç¤ºæ— æ³•è¯†åˆ«
  */
 static int month_from_str(const char *m)
 {
@@ -65,10 +65,10 @@ static int month_from_str(const char *m)
 }
 
 /**
- * @brief ½« HTTP Date ĞĞÖĞµÄÈı×ÖÄ¸ĞÇÆÚËõĞ´×ªÎª RTC ĞÇÆÚÖµ 1~7¡£
+ * @brief å°† HTTP Date è¡Œä¸­çš„ä¸‰å­—æ¯æ˜ŸæœŸç¼©å†™è½¬ä¸º RTC æ˜ŸæœŸå€¼ 1~7ã€‚
  *
- * @param[in] w Ö¸Ïò "Mon" µÈ 3 ×Ö·ûĞÇÆÚ×Ö·û´®
- * @return 1=ÖÜÒ» ¡­ 7=ÖÜÈÕ£»ÎŞ·¨Ê¶±ğÊ±Ä¬ÈÏ 1
+ * @param[in] w æŒ‡å‘ "Mon" ç­‰ 3 å­—ç¬¦æ˜ŸæœŸå­—ç¬¦ä¸²
+ * @return 1=å‘¨ä¸€ â€¦ 7=å‘¨æ—¥ï¼›æ— æ³•è¯†åˆ«æ—¶é»˜è®¤ 1
  */
 static int weekday_from_str(const char *w)
 {
@@ -84,11 +84,11 @@ static int weekday_from_str(const char *w)
 }
 
 /**
- * @brief ·µ»ØÖ¸¶¨¹«ÀúÄêÔÂµÄÌìÊı£¨º¬ÈòÄê 2 ÔÂ´¦Àí£©¡£
+ * @brief è¿”å›æŒ‡å®šå…¬å†å¹´æœˆçš„å¤©æ•°ï¼ˆå«é—°å¹´ 2 æœˆå¤„ç†ï¼‰ã€‚
  *
- * @param[in] year ËÄÎ»¹«ÀúÄê·İ
- * @param[in] mon  ÔÂ·İ 1~12
- * @return ¸ÃÔÂÌìÊı
+ * @param[in] year å››ä½å…¬å†å¹´ä»½
+ * @param[in] mon  æœˆä»½ 1~12
+ * @return è¯¥æœˆå¤©æ•°
  */
 static int days_in_month(int year, int mon)
 {
@@ -105,15 +105,15 @@ static int days_in_month(int year, int mon)
 }
 
 /**
- * @brief ½« GMT Ê±¿Ì¼Ó 8 Ğ¡Ê±×ªÎª±±¾©Ê±¼ä£¬²¢´¦ÀíÈÕ/ÔÂ/Äê/ĞÇÆÚ½øÎ»¡£
+ * @brief å°† GMT æ—¶åˆ»åŠ  8 å°æ—¶è½¬ä¸ºåŒ—äº¬æ—¶é—´ï¼Œå¹¶å¤„ç†æ—¥/æœˆ/å¹´/æ˜ŸæœŸè¿›ä½ã€‚
  *
- * @param[in,out] year  Äê
- * @param[in,out] mon   ÔÂ
- * @param[in,out] day   ÈÕ
- * @param[in,out] hour  Ê±
- * @param[in,out] min   ·Ö£¨±¾º¯ÊıÎ´ĞŞ¸Ä£¬±£Áô½Ó¿Ú£©
- * @param[in,out] sec   Ãë£¨±¾º¯ÊıÎ´ĞŞ¸Ä£¬±£Áô½Ó¿Ú£©
- * @param[in,out] wday  ĞÇÆÚ 1~7
+ * @param[in,out] year  å¹´
+ * @param[in,out] mon   æœˆ
+ * @param[in,out] day   æ—¥
+ * @param[in,out] hour  æ—¶
+ * @param[in,out] min   åˆ†ï¼ˆæœ¬å‡½æ•°æœªä¿®æ”¹ï¼Œä¿ç•™æ¥å£ï¼‰
+ * @param[in,out] sec   ç§’ï¼ˆæœ¬å‡½æ•°æœªä¿®æ”¹ï¼Œä¿ç•™æ¥å£ï¼‰
+ * @param[in,out] wday  æ˜ŸæœŸ 1~7
  */
 static void apply_cst_offset(int *year, int *mon, int *day, int *hour,
 	int *min, int *sec, int *wday)
@@ -149,12 +149,12 @@ static void apply_cst_offset(int *year, int *mon, int *day, int *hour,
 }
 
 /**
- * @brief ´Ó HTTP ÏìÓ¦ÎÄ±¾ÖĞ½ØÈ¡ÍêÕû Date ĞĞ£¨´Ó "Date:" µ½ "GMT" º¬£©¡£
+ * @brief ä» HTTP å“åº”æ–‡æœ¬ä¸­æˆªå–å®Œæ•´ Date è¡Œï¼ˆä» "Date:" åˆ° "GMT" å«ï¼‰ã€‚
  *
- * @param[in]  rx     HTTP ÏìÓ¦»º³åÇø£¨ÒÔ '\0' ½áÎ²£©
- * @param[out] out    Êä³ö Date ĞĞ×Ö·û´®
- * @param[in]  out_sz out »º³åÇøÈİÁ¿£¨º¬ '\0'£©
- * @return 0 ½ØÈ¡³É¹¦£»-1 Î´ÕÒµ½ Date »ò GMT£¬»òĞĞ¹ı¶Ì
+ * @param[in]  rx     HTTP å“åº”ç¼“å†²åŒºï¼ˆä»¥ '\0' ç»“å°¾ï¼‰
+ * @param[out] out    è¾“å‡º Date è¡Œå­—ç¬¦ä¸²
+ * @param[in]  out_sz out ç¼“å†²åŒºå®¹é‡ï¼ˆå« '\0'ï¼‰
+ * @return 0 æˆªå–æˆåŠŸï¼›-1 æœªæ‰¾åˆ° Date æˆ– GMTï¼Œæˆ–è¡Œè¿‡çŸ­
  */
 static int nettime_extract_date_line(const char *rx, char *out, unsigned out_sz)
 {
@@ -181,10 +181,10 @@ static int nettime_extract_date_line(const char *rx, char *out, unsigned out_sz)
 }
 
 /**
- * @brief ½âÎö HTTP Date ĞĞ£¬GMT+8 ºóĞ´ÈëÈ«¾Ö RTC_TimeStructure / RTC_DateStructure ²¢ SetTime/SetDate¡£
+ * @brief è§£æ HTTP Date è¡Œï¼ŒGMT+8 åå†™å…¥å…¨å±€ RTC_TimeStructure / RTC_DateStructure å¹¶ SetTime/SetDateã€‚
  *
- * @param[in] date_line ĞÎÈç "Date: Fri, 22 May 2026 19:36:00 GMT" µÄ×Ö·û´®
- * @return 0 ½âÎö²¢Ğ´ RTC ³É¹¦£»-1 ¸ñÊ½´íÎó»ò RTC Ğ´ÈëÊ§°Ü
+ * @param[in] date_line å½¢å¦‚ "Date: Fri, 22 May 2026 19:36:00 GMT" çš„å­—ç¬¦ä¸²
+ * @return 0 è§£æå¹¶å†™ RTC æˆåŠŸï¼›-1 æ ¼å¼é”™è¯¯æˆ– RTC å†™å…¥å¤±è´¥
  */
 static int nettime_parse_and_set_rtc(const char *date_line)
 {
@@ -203,7 +203,7 @@ static int nettime_parse_and_set_rtc(const char *date_line)
 		return -1;
 
 	wday = weekday_from_str(wday_str);
-	/* HTTP Date Îª GMT£¬+8 Îª±±¾©Ê±¼ä£¨Èç 19:25 GMT -> ´ÎÈÕ 03:25£© */
+	/* HTTP Date ä¸º GMTï¼Œ+8 ä¸ºåŒ—äº¬æ—¶é—´ï¼ˆå¦‚ 19:25 GMT -> æ¬¡æ—¥ 03:25ï¼‰ */
 	apply_cst_offset(&year, &mon, &day, &hour, &min, &sec, &wday);
 
 	RTC_DateStructure.RTC_Year    = dec_to_bcd((uint8_t)(year - 2000));
@@ -226,10 +226,10 @@ static int nettime_parse_and_set_rtc(const char *date_line)
 }
 
 /**
- * @brief ÂÖÑ¯µÈ´ı ESP8266 ½ÓÊÕ»º³åÖĞ³öÏÖ "GMT" ÇÒ×Ö½Ú¼ÆÊıÎÈ¶¨Ô¼ 60ms¡£
+ * @brief è½®è¯¢ç­‰å¾… ESP8266 æ¥æ”¶ç¼“å†²ä¸­å‡ºç° "GMT" ä¸”å­—èŠ‚è®¡æ•°ç¨³å®šçº¦ 60msã€‚
  *
- * @param[in] timeout_ms ×î´óµÈ´ıºÁÃëÊı
- * @return 0 ÒÑÊÕµ½ÍêÕû Date ĞĞ±êÖ¾£»-1 ³¬Ê±
+ * @param[in] timeout_ms æœ€å¤§ç­‰å¾…æ¯«ç§’æ•°
+ * @return 0 å·²æ”¶åˆ°å®Œæ•´ Date è¡Œæ ‡å¿—ï¼›-1 è¶…æ—¶
  */
 static int nettime_wait_http_date(uint32_t timeout_ms)
 {
@@ -261,9 +261,9 @@ static int nettime_wait_http_date(uint32_t timeout_ms)
 }
 
 /**
- * @brief ¹Ø±Õ NETTIME_LINK_ID ¶ÔÓ¦µÄ TCP Á¬½Ó£¨AT+CIPCLOSE£©¡£
+ * @brief å…³é—­ NETTIME_LINK_ID å¯¹åº”çš„ TCP è¿æ¥ï¼ˆAT+CIPCLOSEï¼‰ã€‚
  *
- * @param ÎŞ
+ * @param æ— 
  */
 static void nettime_close_link(void)
 {
@@ -273,12 +273,12 @@ static void nettime_close_link(void)
 }
 
 /**
- * @brief ¾­ ESP8266 Ïò www.beijing-time.org ·¢Æğ HTTP GET£¬½âÎö Date Í·²¢Í¬²½ STM32 RTC£¨±±¾©Ê±¼ä£©¡£
+ * @brief ç» ESP8266 å‘ www.beijing-time.org å‘èµ· HTTP GETï¼Œè§£æ Date å¤´å¹¶åŒæ­¥ STM32 RTCï¼ˆåŒ—äº¬æ—¶é—´ï¼‰ã€‚
  *
- * @param ÎŞ
- * @return 0 ¶ÔÊ±³É¹¦£»-1 Á¬½Ó/ÊÕ·¢/½âÎö/Ğ´ RTC Ê§°Ü£¨RTC ±£³ÖÔ­Öµ£©
+ * @param æ— 
+ * @return 0 å¯¹æ—¶æˆåŠŸï¼›-1 è¿æ¥/æ”¶å‘/è§£æ/å†™ RTC å¤±è´¥ï¼ˆRTC ä¿æŒåŸå€¼ï¼‰
  *
- * @note ÄÚ²¿×î¶àÖØÊÔ 3 ´Î£»³É¹¦Ê±µ÷ÓÃ rtc_notify_oled_refresh()£»È«³Ì³ÖÓĞ esp8266_uart_lock¡£
+ * @note å†…éƒ¨æœ€å¤šé‡è¯• 3 æ¬¡ï¼›æˆåŠŸæ—¶è°ƒç”¨ rtc_notify_oled_refresh()ï¼›å…¨ç¨‹æŒæœ‰ esp8266_uart_lockã€‚
  */
 int32_t esp8266_nettime_sync(void)
 {
