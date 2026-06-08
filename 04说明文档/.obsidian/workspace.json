@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "4x4矩阵键盘.md",
+                "file": "git提交规范命名.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "4x4矩阵键盘"
+              "title": "git提交规范命名"
             }
           }
         ]
@@ -186,6 +186,11 @@
   "active": "68dda9ed00781fc9",
   "lastOpenFiles": [
     "STM32外部中断线EXTI完全指南.md",
+    "4x4矩阵键盘.md",
+    "ESP8266/OneNET云端下行控灯与set_reply应答说明.md",
+    "ESP8266/FreeRTOS调试打印与ESP8266联调问题总结.md",
+    "ESP8266/ESP8266-OneNET-MQTT与FreeRTOS任务说明.md",
+    "ESP8266/ESP8266-MQTT属性上报与mqtt_publish_data说明.md",
     "ESP8266/ESP8266-HTTP网络校时与OLED显示说明.md"
   ]
 }
